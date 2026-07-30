@@ -1,0 +1,74 @@
+# Shipped defaults. Override with env vars (LE_*) or CLI flags.
+# See README.md "Configuration" for the full precedence chain.
+
+output_dir: out
+db_path: out/enrichment.db
+log_dir: logs
+
+# Keep workers low for the free providers — SearXNG proxies real search engines
+# which will CAPTCHA an instance that hammers them. Raise this only for paid APIs.
+workers: 4
+batch_size: 200
+stale_claim_seconds: 900
+
+# The user requirement: write nothing below 95% confidence.
+confidence_threshold: 0.95
+# Below the threshold but above this floor -> review_queue.csv (never the main column).
+review_queue_floor: 0.55
+
+enable_company_tier: true
+enable_person_tier: true
+enable_negative_cache: true
+serp_cache_ttl_days: 30
+
+log_level: INFO
+dashboard: true
+
+# core_conjunction is name_similarity * company_coverage (a product, not a sum) —
+# see ScoringWeights in settings.py for why.
+weights:
+  core_conjunction: 0.70
+  slug_agreement: 0.10
+  location_match: 0.08
+  country_subdomain: 0.05
+  industry_match: 0.04
+  designation_match: 0.03
+
+# Maps the raw score to a probability. Replaced by `main.py calibrate`.
+calibration:
+  midpoint: 0.55
+  slope: 22.0
+
+reject:
+  require_company_token: true
+  min_company_token_coverage: 0.60
+  min_name_similarity: 0.82
+  min_margin: 0.08
+  reject_shared_url: true
+
+rate_limit:
+  requests_per_second: 0.5
+  burst: 2
+  throttle_backoff_factor: 0.5
+  recovery_factor: 1.02
+  min_requests_per_second: 0.05
+
+retry:
+  max_attempts: 4
+  base_delay_seconds: 2.0
+  max_delay_seconds: 120.0
+  jitter: 0.3
+
+provider:
+  name: searxng
+  searxng_url: http://localhost:8080
+  timeout_seconds: 30.0
+  results_per_query: 10
+  user_agent: gcia-linkedin-enrichment/1.0
+
+llm:
+  enabled: false
+  model: claude-sonnet-5
+  band_low: 0.80
+  band_high: 0.95
+  max_tokens: 512

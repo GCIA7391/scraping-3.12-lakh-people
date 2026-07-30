@@ -1,0 +1,95 @@
+[
+  {
+    "_comment": "CASE 1 — TRUE POSITIVE. Real search run during design. Titles and URLs are verbatim from the live result set. Snippets were not returned by the search tool used, so they are left empty; this makes the fixture strictly harder than production, where a snippet would add location evidence.",
+    "query": "\"Girish Rowjee\" \"Greytip Software\" LinkedIn Bangalore",
+    "provider": "fixture",
+    "results": [
+      {"title": "Girish Rowjee - Greytip Software Pvt. Ltd. | LinkedIn", "url": "https://www.linkedin.com/in/girishrowjee/", "snippet": "", "rank": 0},
+      {"title": "Greytip Software Pvt. Ltd. | LinkedIn", "url": "https://www.linkedin.com/company/greytip-software-pvt-ltd-", "snippet": "", "rank": 1},
+      {"title": "Girish Rowjee Email & Phone Number | Greytip Software Pvt. Ltd. CEO Contact Information", "url": "https://rocketreach.co/girish-rowjee-email_1786181", "snippet": "", "rank": 2},
+      {"title": "Girish Rowjee - Co-Founder & CEO @ greytHR - Crunchbase Person Profile", "url": "https://www.crunchbase.com/person/girish-rowjee", "snippet": "", "rank": 3},
+      {"title": "Girish Rowjee, co-founder and CEO of Greytip Software Pvt.", "url": "https://www.linkedin.com/posts/greytip-software-pvt-ltd-_why-hr-process-automation-is-important-for-activity-6958791389262331905-MCQV", "snippet": "", "rank": 4}
+    ]
+  },
+  {
+    "_comment": "CASE 2 — RIGHT NAME, WRONG COMPANY. The subject's exact name exists on LinkedIn but at a different employer. Name-only matching writes a false positive here. Must resolve to a blank.",
+    "query": "\"Debasheesh Bagchi\" \"Ubiqtech Software\" LinkedIn",
+    "provider": "fixture",
+    "results": [
+      {"title": "Debasheesh Bagchi - wep solutions india ltd | LinkedIn", "url": "https://www.linkedin.com/in/debasheesh-bagchi-683b3b1/", "snippet": "", "rank": 0},
+      {"title": "Debarshi Bagchi - Greytrix | LinkedIn", "url": "https://www.linkedin.com/in/debarshi-bagchi-9ab85bb5/", "snippet": "", "rank": 1},
+      {"title": "UBIQTECH SOFTWARE PRIVATE LIMITED | ZaubaCorp", "url": "https://www.zaubacorp.com/company/UBIQTECH-SOFTWARE-PRIVATE-LIMITED/U72200KA2004PTC034337", "snippet": "", "rank": 2},
+      {"title": "Ubiq | LinkedIn", "url": "https://www.linkedin.com/company/ubiq-inc-", "snippet": "", "rank": 3}
+    ]
+  },
+  {
+    "_comment": "CASE 3 — RIGHT COMPANY, WRONG PEOPLE. A roster query returns ten genuine employees of the correct company, none of whom is the subject. Company-only matching writes a false positive here. Must resolve to a blank. Note ranks 2 and 9 are company-branded /in/ profiles, not people.",
+    "query": "site:linkedin.com/in \"Melukote Shivaramu Lokesh\" Synthesis Winding Technologies",
+    "provider": "fixture",
+    "results": [
+      {"title": "Guru sajjan - Synthesis Winding Technologies Pvt Ltd", "url": "https://in.linkedin.com/in/guru-sajjan-ba156213b", "snippet": "", "rank": 0},
+      {"title": "Jagadish B.M - Synthesis Winding Technologies Pvt Ltd", "url": "https://in.linkedin.com/in/jagadish-b-m-151941104", "snippet": "", "rank": 1},
+      {"title": "Synthesis Winding Technologies PVT LTD", "url": "https://in.linkedin.com/in/synthesis-winding-technologies-pvt-ltd-bangalore", "snippet": "", "rank": 2},
+      {"title": "Mahesh Kori - Synthesis Winding Technologies Pvt Ltd.", "url": "https://in.linkedin.com/in/mahesh-kori-3ab2912b", "snippet": "", "rank": 3},
+      {"title": "Mahesh Shastry - Synthesis Winding Technologies Pvt Ltd", "url": "https://in.linkedin.com/in/mahesh-shastry-434944b9", "snippet": "", "rank": 4},
+      {"title": "Swasthik NS - Synthesis Winding Technologies Pvt Ltd", "url": "https://in.linkedin.com/in/swasthik-ns-88832422a", "snippet": "", "rank": 5},
+      {"title": "Vikas H V - Synthesis Winding Technologies Pvt Ltd", "url": "https://in.linkedin.com/in/vikas-h-v-27141b1ab", "snippet": "", "rank": 6},
+      {"title": "Santosh Bellur - Synthesis Winding Technologies Pvt Ltd", "url": "https://in.linkedin.com/in/santosh-bellur-6555b9204", "snippet": "", "rank": 7},
+      {"title": "Sanjai A R - Synthesis Winding Technologies Pvt Ltd", "url": "https://in.linkedin.com/in/sanjai-a-r-27178190", "snippet": "", "rank": 8},
+      {"title": "Design Internship - Synthesis Winding Technologies Pvt Ltd", "url": "https://in.linkedin.com/in/synthesis-india-643b74175", "snippet": "", "rank": 9}
+    ]
+  },
+  {
+    "_comment": "CASE 4 — HOMONYMS. Eight distinct, equally plausible people share this name. The input file itself contains 54 rows named 'Praveen Kumar'. With no company anchor present in any result, every candidate must fail the company gate.",
+    "query": "\"Praveen Kumar\" \"Director\" LinkedIn Hyderabad",
+    "provider": "fixture",
+    "results": [
+      {"title": "Praveen Kumar - Director - Sales and Business Development - Rotomotive Powerdrives India Ltd | LinkedIn", "url": "https://in.linkedin.com/in/praveen-kumar-1a19a738", "snippet": "", "rank": 0},
+      {"title": "Praveen Kumar - University of Hyderabad | LinkedIn", "url": "https://www.linkedin.com/in/praveen-kumar-13713939/", "snippet": "", "rank": 1},
+      {"title": "Praveen Kumar - Director Application Development | LinkedIn", "url": "https://www.linkedin.com/in/praveen-kumar-77227715/", "snippet": "", "rank": 2},
+      {"title": "Praveen Kumar - Director - Ergos Business Solutions Pvt. Ltd | LinkedIn", "url": "https://in.linkedin.com/in/praveen-kumar-4a667028", "snippet": "", "rank": 3},
+      {"title": "PRAVEEN KUMAR - -- | LinkedIn", "url": "https://www.linkedin.com/in/praveen-kumar-63643a282/", "snippet": "", "rank": 4},
+      {"title": "Praveen Kumar - Verizon | LinkedIn", "url": "https://www.linkedin.com/in/praveen-kumar-information-technology-director/", "snippet": "", "rank": 5},
+      {"title": "Praveen Kumar - Hyderabad, Telangana, India | Professional Profile | LinkedIn", "url": "https://www.linkedin.com/in/ispraveenkumar/", "snippet": "", "rank": 6},
+      {"title": "P Kumar - GyanSys Inc. | LinkedIn", "url": "https://www.linkedin.com/in/praveen-ku/", "snippet": "", "rank": 7}
+    ]
+  },
+  {
+    "_comment": "CASE 5 — ROSTER RECALL LIMIT. A company-roster query for Greytip Software returns nine employees but NOT the founder from case 1. This is why a company-roster tier alone is insufficient and a per-person tier is required. Rank 0 is a company-branded /in/ profile.",
+    "query": "site:linkedin.com/in \"Greytip Software\"",
+    "provider": "fixture",
+    "results": [
+      {"title": "Greytip Software - Greytip Software Pvt. Ltd. | LinkedIn", "url": "https://www.linkedin.com/in/greytip-software-802362140/", "snippet": "", "rank": 0},
+      {"title": "Azhar Mohammed - Greytip Software Pvt. Ltd | LinkedIn", "url": "https://www.linkedin.com/in/azhar-mohammed-4149b24/", "snippet": "", "rank": 1},
+      {"title": "Mudassar Khan - Greytip Software Pvt. Ltd. | LinkedIn", "url": "https://www.linkedin.com/in/mudassark/", "snippet": "", "rank": 2},
+      {"title": "Hemanth C - Greytip Software Pvt. Ltd. | LinkedIn", "url": "https://www.linkedin.com/in/hemanth-c-b4146589/", "snippet": "", "rank": 3},
+      {"title": "Monisha Babu - Greytip Software Pvt. Ltd. | LinkedIn", "url": "https://www.linkedin.com/in/monishav/", "snippet": "", "rank": 4},
+      {"title": "Muralidhar B R - Greytip Software Pvt. Ltd. | LinkedIn", "url": "https://in.linkedin.com/in/muralidhar-b-r-a081b46", "snippet": "", "rank": 5},
+      {"title": "Purva Tushir - Greytip Software Pvt. Ltd. | LinkedIn", "url": "https://www.linkedin.com/in/purva-tushir-64b52822b/", "snippet": "", "rank": 6},
+      {"title": "Raghu Reddy - Lead System Admin at Greytip Software Pvt ...", "url": "https://in.linkedin.com/in/raghu-reddy-0431a96b", "snippet": "", "rank": 7},
+      {"title": "Akshay Kumar - BDE @ Greytip Software Pvt. Ltd. | LinkedIn", "url": "https://www.linkedin.com/in/akshay-kumar-b977b08b/", "snippet": "", "rank": 8}
+    ]
+  },
+  {
+    "_comment": "CASE 6a — NO FOOTPRINT, EPONYMOUS COMPANY. The company is named after the person, so results matching only the person's name must NOT be allowed to corroborate the company. Establishes the negative cache.",
+    "query": "site:linkedin.com/in \"Zainab Fatima Fast Foods\"",
+    "provider": "fixture",
+    "results": [
+      {"title": "zainab fatima - Berkeley, Illinois, United States | Professional Profile | LinkedIn", "url": "https://www.linkedin.com/in/zainab-fatima-100343a/", "snippet": "", "rank": 0},
+      {"title": "Zainab Fatima - Ericsson", "url": "https://ca.linkedin.com/in/zainab-fatima-90b19277", "snippet": "", "rank": 1},
+      {"title": "80+ \"Zainab Fatima\" profiles", "url": "https://www.linkedin.com/pub/dir/Zainab+Fatima/+", "snippet": "", "rank": 2},
+      {"title": "Zainab Fatima - Customer Service Representative", "url": "https://in.linkedin.com/in/zainab-fatima-51a555216", "snippet": "", "rank": 3},
+      {"title": "Zainab Fatima - Tampa, Florida, United States", "url": "https://www.linkedin.com/in/zainab-fatima-589757322", "snippet": "", "rank": 4}
+    ]
+  },
+  {
+    "_comment": "CASE 6b — NO FOOTPRINT. A typical micro-company: the engine still returns unrelated noise, so the negative-cache test must be 'no result carries the company tokens', not 'zero results returned'.",
+    "query": "site:linkedin.com/in \"Natesh Impex\"",
+    "provider": "fixture",
+    "results": [
+      {"title": "Karan Arora - Sales Director - KARAN EMBOSSING PRIVATE LIMITED | LinkedIn", "url": "https://www.linkedin.com/in/karan-arora-8b995616b/", "snippet": "", "rank": 0},
+      {"title": "Lion Dates", "url": "https://en.wikipedia.org/wiki/Lion_Dates", "snippet": "", "rank": 1},
+      {"title": "Nayak Impex", "url": "https://m.indiamart.com/nayak-impex", "snippet": "", "rank": 2}
+    ]
+  }
+]
