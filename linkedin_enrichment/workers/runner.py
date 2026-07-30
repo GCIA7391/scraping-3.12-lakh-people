@@ -151,8 +151,8 @@ class LadderRunner:
                         Decision.BLANK_ERROR,
                         notes=(
                             "company lookup was inconclusive (the search backend did "
-                            "not return usable results); not recorded as absent — "
-                            "this row will be retried"
+                            "not return usable results); deliberately not recorded as "
+                            "an absence"
                         ),
                     ),
                     queries_used=queries, tier=int(Tier.COMPANY_ROSTER),

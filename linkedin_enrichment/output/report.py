@@ -19,6 +19,9 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # Human-readable explanation for every decision the pipeline can reach.
+#: Above this share of inconclusive searches, the run's blanks are not evidence.
+INCONCLUSIVE_WARN_THRESHOLD = 0.20
+
 DECISION_LABELS = {
     "matched": "Matched (>= threshold, written to output)",
     "blank_no_candidate": "Blank — no candidate passed the name+company gates",
@@ -54,10 +57,31 @@ class QCReport:
     unique_companies: int = 0
     companies_with_footprint: int = 0
     duplicate_rows: int = 0
+    deferred_rows: int = 0
+    inconclusive_searches: int = 0
+    queries_issued: int = 0
 
     @property
     def match_rate(self) -> float:
         return (self.matched / self.processed_rows) if self.processed_rows else 0.0
+
+    @property
+    def inconclusive_rate(self) -> float:
+        return (
+            self.inconclusive_searches / self.queries_issued
+            if self.queries_issued else 0.0
+        )
+
+    @property
+    def trustworthy(self) -> bool:
+        """Can the blanks in this run be believed?
+
+        A blank means "we searched and found nothing convincing". That claim only
+        holds if the searches actually worked. When a large share came back
+        unparseable, or rows are still queued for retry, the blanks reflect the
+        state of the search backend rather than the state of the world.
+        """
+        return self.inconclusive_rate <= INCONCLUSIVE_WARN_THRESHOLD and not self.deferred_rows
 
     def to_dict(self) -> dict[str, Any]:
         data = {
@@ -72,6 +96,10 @@ class QCReport:
             "match_rate": round(self.match_rate, 4),
             "processing_time_seconds": round(self.elapsed_seconds, 2),
             "review_queue_size": self.review_queue_size,
+            "deferred_rows": self.deferred_rows,
+            "inconclusive_searches": self.inconclusive_searches,
+            "inconclusive_rate": round(self.inconclusive_rate, 4),
+            "run_trustworthy": self.trustworthy,
             "unique_companies": self.unique_companies,
             "companies_with_linkedin_footprint": self.companies_with_footprint,
             "duplicate_rows_detected": self.duplicate_rows,
@@ -117,6 +145,11 @@ def build_report(store, settings, *, run_id: str, elapsed: float,
         search=search_stats or {},
         ladder=ladder_stats or {},
         caches=cache_stats or {},
+        deferred_rows=store.scalar(
+            "SELECT COUNT(*) FROM records WHERE status = 'deferred'"
+        ) or 0,
+        inconclusive_searches=int((search_stats or {}).get("inconclusive_searches", 0) or 0),
+        queries_issued=int((search_stats or {}).get("queries_issued", 0) or 0),
         review_queue_size=store.scalar("SELECT COUNT(*) FROM review_candidates") or 0,
         unique_companies=store.scalar(
             "SELECT COUNT(DISTINCT company_key) FROM records WHERE company_key <> ''"
@@ -146,6 +179,36 @@ def render_text(report: QCReport) -> str:
     add(f"  Run ID                 : {report.run_id}")
     add(f"  Processing time        : {_duration(report.elapsed_seconds)}")
     add("")
+    # Placed first: if the run cannot be believed, nothing below it should be
+    # quoted to anyone before the cause is fixed.
+    add("  RUN TRUSTWORTHINESS")
+    if report.queries_issued:
+        add(
+            f"    Inconclusive searches: {report.inconclusive_searches:>12,}"
+            f"  ({report.inconclusive_rate:.1%} of {report.queries_issued:,} issued)"
+        )
+    add(f"    Rows queued for retry: {report.deferred_rows:>12,}")
+    if report.trustworthy:
+        add("    OK — searches completed normally; the blanks below are real findings.")
+    else:
+        add("")
+        if report.inconclusive_rate > INCONCLUSIVE_WARN_THRESHOLD:
+            add(
+                f"    WARNING: {report.inconclusive_rate:.1%} of searches returned no "
+                "parseable results."
+            )
+            add("    The blank rows in this run are NOT evidence that these people have")
+            add("    no LinkedIn profile — they reflect the state of the search backend.")
+        if report.deferred_rows:
+            add(
+                f"    WARNING: {report.deferred_rows:,} row(s) are still queued for retry "
+                "and remain unresolved."
+            )
+        add("")
+        add("    Do this: `python main.py preflight`, fix what it reports, then")
+        add("             `python main.py retry` (add --reset if attempts were exhausted).")
+    add("")
+
     add("  ROWS")
     add(f"    Total rows           : {report.total_rows:>12,}")
     add(f"    Processed rows       : {report.processed_rows:>12,}")

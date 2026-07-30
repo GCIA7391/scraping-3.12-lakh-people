@@ -35,6 +35,10 @@ class RunProgress:
     matched: int = 0
     blank: int = 0
     errors: int = 0
+    #: Transient failures parked for a later pass.
+    deferred: int = 0
+    #: Rows that used up their attempt budget and were finalised.
+    exhausted: int = 0
     started_at: float = field(default_factory=time.time)
     decisions: dict[str, int] = field(default_factory=dict)
     confidence_sum: float = 0.0
@@ -169,9 +173,12 @@ class WorkerPool:
                 raise
             except Exception as exc:  # noqa: BLE001 - one bad row must not kill the run
                 logger.exception("worker %d failed on row %s", worker_id, row_uid)
+                # Deferred, not marked 'error': nothing ever reclaimed 'error',
+                # so a row that threw once was stranded for good.
                 await asyncio.to_thread(
-                    self.store.mark_status, row_uid, "error",
-                    error=str(exc), bump_attempts=True,
+                    self.store.defer_row, row_uid,
+                    error=f"{type(exc).__name__}: {exc}",
+                    max_attempts=self.settings.max_row_attempts,
                 )
                 self.progress.processed += 1
                 self.progress.errors += 1
@@ -194,8 +201,28 @@ class WorkerPool:
                 self._queue.task_done()
 
     def _persist(self, outcome: RowOutcome) -> None:
-        """Write the decision, then any review candidates. Checkpoint per row."""
+        """Write the decision, then any review candidates. Checkpoint per row.
+
+        A transient failure is *deferred* rather than written as a final answer:
+        a search that errored or came back unparseable tells us nothing about the
+        person, and recording it as a settled blank would bake an infrastructure
+        fault into the deliverable.
+        """
         match = outcome.match
+
+        if match.decision is Decision.BLANK_ERROR:
+            deferred = self.store.defer_row(
+                outcome.row_uid,
+                error=outcome.error or match.notes or "transient search failure",
+                max_attempts=self.settings.max_row_attempts,
+            )
+            if deferred:
+                self.progress.deferred += 1
+                return
+            # Budget exhausted: defer_row has finalised it with an honest note.
+            self.progress.exhausted += 1
+            return
+
         self.store.write_result(
             outcome.row_uid,
             linkedin_url=match.linkedin_url,

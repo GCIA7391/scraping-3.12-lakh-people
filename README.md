@@ -258,6 +258,8 @@ Key settings:
 | `confidence_threshold` | 0.95 | Below this, the LinkedIn column stays blank |
 | `review_queue_floor` | 0.55 | Below the threshold but above this → review file |
 | `workers` | 4 | Concurrent workers. Keep low for free providers |
+| `max_row_attempts` | 3 | Passes a row may retry after a *transient* failure |
+| `retry.max_attempts` | 4 | HTTP retries *within* a single search — not the same thing |
 | `rate_limit.requests_per_second` | 0.5 | Starting rate; adapts down on throttling |
 | `reject.min_name_similarity` | 0.82 | Name evidence gate |
 | `reject.min_company_token_coverage` | 0.60 | Company evidence gate |
@@ -386,6 +388,56 @@ So a process killed at any instant leaves every row either finished or
 reclaimable. Re-running `run` (or `resume`) continues exactly where it stopped.
 Ingestion is idempotent, so passing `--input` again is harmless.
 
+### Transient failures retry themselves
+
+A *terminal* decision means "we searched and this is the answer". A *transient*
+failure means "we did not get an answer" — a search error, or a company lookup
+that came back unparseable. Only the first is ever written as a result.
+
+```
+pending → claimed → [transient failure] → deferred        (attempts += 1)
+                                             │
+                        next run: attempts < max_row_attempts → pending
+                                  attempts ≥ max_row_attempts → done, with a
+                                                                note saying so
+```
+
+Rows are parked as `deferred` rather than returned straight to `pending`, so a
+broken backend cannot spin them in a hot loop; the next pass picks them up. The
+budget (`max_row_attempts`, default 3) guarantees the loop terminates, and a row
+that exhausts it is finalised with an accurate note — never a promise of a retry
+that will not come.
+
+```bash
+python main.py retry            # requeue deferred rows and continue
+python main.py retry --reset    # also requeue rows that exhausted their attempts
+python main.py retry --no-run   # requeue only
+```
+
+Use `--reset` after fixing the underlying cause (an egress allowlist, a stopped
+SearXNG): those rows spent their attempts on a problem that no longer exists.
+Rows that already succeeded are untouched, and cached SERP responses mean
+re-resolving them costs nothing.
+
+### Reading the trustworthiness block
+
+Every QC report opens with it, because a blank only means "we searched and found
+nothing convincing" if the searches actually worked:
+
+```
+  RUN TRUSTWORTHINESS
+    Inconclusive searches:      184,220  (85.2% of 216,277 issued)
+    Rows queued for retry:      179,441
+
+    WARNING: 85.2% of searches returned no parseable results.
+    The blank rows in this run are NOT evidence that these people have
+    no LinkedIn profile — they reflect the state of the search backend.
+```
+
+It warns above 20% inconclusive, or if any rows remain deferred. A clean run says
+so explicitly instead. **If this block warns, do not quote the match rate to
+anyone** — run `preflight`, fix what it reports, then `retry`.
+
 ## Performance tuning
 
 ### Measured at full scale
@@ -474,7 +526,8 @@ the remedy, which is faster than reading this table.
 | `SearXNG selected but no URL set` | `export SEARXNG_URL=http://localhost:8080` |
 | Refusing to start: searches are not working | Preflight failed. Fix the cause above, or `--force` if you are certain |
 | Every row is `blank_no_candidate` | Run `preflight`. If it passes, this is genuine — see [expected yield](#what-to-realistically-expect) |
-| Many rows `blank_error` with "inconclusive" | The backend is unreliable. Those rows were deliberately *not* cached as absent and will retry on the next run |
+| Many rows `blank_error` with "inconclusive" | The backend is unreliable. Those rows are deferred, not cached as absent, and retry on the next pass — see [transient failures](#transient-failures-retry-themselves) |
+| QC report warns about trustworthiness | Searches were not working. Do not quote the match rate; run `preflight`, fix, then `retry` |
 | `duckduckgo: 202 Ratelimit` | Expected under load. The limiter backs off automatically; lower the configured rate if it persists |
 | `scoring weights must sum to 1.0` | Custom weights in your config do not total 1.0 |
 | Run seems stuck | Check `logs/enrichment.jsonl`. A very low adapted rate means the provider is throttling |

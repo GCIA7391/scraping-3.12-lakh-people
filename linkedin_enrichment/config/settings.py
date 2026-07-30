@@ -186,6 +186,11 @@ class Settings:
     # A row claimed but not completed within this window is presumed abandoned
     # (crashed worker) and returned to the pending pool on the next startup.
     stale_claim_seconds: float = 900.0
+    # How many passes a single row may be retried after a *transient* failure
+    # (search error, or a company lookup that came back unparseable). Distinct
+    # from retry.max_attempts, which governs HTTP retries within one search.
+    # Once exhausted the row is finalised with an explicit note.
+    max_row_attempts: int = 3
 
     # --- decisioning ---
     confidence_threshold: float = 0.95

@@ -47,7 +47,12 @@ CREATE TABLE IF NOT EXISTS records (
     -- Points at the canonical row_uid when this row is an exact repeat.
     dup_of       TEXT,
 
-    -- pending | claimed | done | skipped | error
+    -- pending  : waiting to be claimed
+    -- claimed  : a worker holds it right now
+    -- done     : terminal, a result row exists
+    -- skipped  : rejected by Tier 0, never searched
+    -- deferred : transient failure; retried on the next pass while attempts remain
+    -- error    : legacy/unexpected failure (requeued by `main.py retry --reset`)
     status       TEXT NOT NULL DEFAULT 'pending',
     skip_reason  TEXT NOT NULL DEFAULT '',
     tier         INTEGER NOT NULL DEFAULT 0,

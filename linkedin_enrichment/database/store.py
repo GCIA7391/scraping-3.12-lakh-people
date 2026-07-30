@@ -259,6 +259,136 @@ class Store:
                 payload,
             )
 
+    # ------------------------------------------------------------------
+    # Transient-failure retry
+    # ------------------------------------------------------------------
+    def defer_row(self, row_uid: str, *, error: str, max_attempts: int) -> bool:
+        """Park a transiently-failed row for a later pass.
+
+        Returns True if the row was deferred, False if its attempt budget is
+        exhausted and it has been finalised instead.
+
+        A deferred row deliberately gets **no result row** while it still has
+        attempts left, so a later pass can resolve it properly. Rows that run out
+        of attempts are finalised with a note stating what actually happened —
+        never a promise of a retry that will not come.
+        """
+        now = time.time()
+        with self._tx() as conn:
+            row = conn.execute(
+                "SELECT attempts FROM records WHERE row_uid = ?", (row_uid,)
+            ).fetchone()
+            attempts = (row["attempts"] if row else 0) + 1
+
+            if attempts < max_attempts:
+                conn.execute(
+                    """
+                    UPDATE records
+                    SET status = 'deferred', attempts = ?, last_error = ?,
+                        claimed_at = NULL, updated_at = ?
+                    WHERE row_uid = ?
+                    """,
+                    (attempts, error[:500], now, row_uid),
+                )
+                return True
+
+            # Budget exhausted: finalise honestly.
+            conn.execute(
+                """
+                INSERT INTO results (row_uid, decision, notes, resolved_at)
+                VALUES (?, 'blank_error', ?, ?)
+                ON CONFLICT(row_uid) DO UPDATE SET
+                    decision = 'blank_error', notes = excluded.notes,
+                    linkedin_url = '', confidence = 0.0, resolved_at = excluded.resolved_at
+                """,
+                (
+                    row_uid,
+                    f"search did not succeed after {attempts} attempt(s); "
+                    f"last error: {error[:200]}",
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE records
+                SET status = 'done', attempts = ?, last_error = ?,
+                    claimed_at = NULL, updated_at = ?
+                WHERE row_uid = ?
+                """,
+                (attempts, error[:500], now, row_uid),
+            )
+            return False
+
+    def requeue_deferred(self, max_attempts: int) -> int:
+        """Return deferred rows to the pending pool. Called at run startup.
+
+        Deferring parks a row until the *next* pass rather than putting it
+        straight back to pending, because an immediate requeue would be
+        re-claimed by the same producer against the same broken backend in a hot
+        loop. This is the other half of that: at startup, conditions may have
+        changed, so give them another go.
+        """
+        with self._tx() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE records SET status = 'pending', claimed_at = NULL
+                WHERE status = 'deferred' AND attempts < ?
+                """,
+                (max_attempts,),
+            )
+        if cursor.rowcount:
+            logger.info("requeued %s deferred row(s)", f"{cursor.rowcount:,}")
+        return cursor.rowcount
+
+    def requeue_failed(self, *, reset_attempts: bool = False) -> int:
+        """Requeue rows that failed, for ``main.py retry``.
+
+        With ``reset_attempts`` the budget is cleared too, which is what you want
+        after fixing the underlying cause (an egress allowlist, a dead SearXNG):
+        the rows exhausted their attempts against a problem that no longer exists.
+        """
+        with self._tx() as conn:
+            if reset_attempts:
+                cursor = conn.execute(
+                    """
+                    UPDATE records SET status = 'pending', attempts = 0, claimed_at = NULL
+                    WHERE status IN ('deferred', 'error')
+                       OR row_uid IN (SELECT row_uid FROM results WHERE decision = 'blank_error')
+                    """
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    UPDATE records SET status = 'pending', claimed_at = NULL
+                    WHERE status IN ('deferred', 'error')
+                    """
+                )
+        logger.info("requeued %s failed row(s)", f"{cursor.rowcount:,}")
+        return cursor.rowcount
+
+    def record_unresolved_results(self) -> int:
+        """Give still-deferred rows an output line explaining themselves.
+
+        Mirrors ``record_skipped_results``. Without this a deferred row would
+        appear in the enriched CSV as a bare "not processed". The next pass
+        upserts over whatever is written here.
+        """
+        with self._tx() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO results (row_uid, decision, notes, resolved_at)
+                SELECT r.row_uid, 'blank_error',
+                       'search did not complete; this row is queued for retry — '
+                       || 'run `python main.py retry` after fixing the cause',
+                       ?
+                FROM records r
+                LEFT JOIN results res ON res.row_uid = r.row_uid
+                WHERE r.status = 'deferred' AND res.row_uid IS NULL
+                """,
+                (time.time(),),
+            )
+        return cursor.rowcount
+
     def record_skipped_results(self) -> int:
         """Give every pre-filtered row a result row carrying its skip reason.
 

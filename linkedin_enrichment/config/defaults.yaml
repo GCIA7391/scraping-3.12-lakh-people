@@ -10,6 +10,9 @@ log_dir: logs
 workers: 4
 batch_size: 200
 stale_claim_seconds: 900
+# Passes a row may be retried after a transient failure. Not the same as
+# retry.max_attempts below, which is HTTP retries inside a single search.
+max_row_attempts: 3
 
 # The user requirement: write nothing below 95% confidence.
 confidence_threshold: 0.95

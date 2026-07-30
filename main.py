@@ -226,8 +226,15 @@ def cmd_run(args, settings: Settings) -> int:
 
         # Reclaim work abandoned by a previous crash before claiming anything new.
         store.reclaim_stale(settings.stale_claim_seconds)
+        # Give rows that failed transiently on an earlier pass another go. This
+        # is what makes a run over a flaky free provider self-healing.
+        store.requeue_deferred(settings.max_row_attempts)
 
         asyncio.run(enrich(store, settings, run_id, limit=limit, explain=explain))
+
+        # Rows still deferred at the end need an output line that explains why,
+        # rather than appearing as a bare "not processed".
+        store.record_unresolved_results()
 
         outputs = writer.write_all(store, settings.output_dir)
         review_path = review_queue.write_review_queue(store, settings.output_dir)
@@ -347,6 +354,27 @@ def cmd_estimate(args, settings: Settings) -> int:
     return 0
 
 
+def cmd_retry(args, settings: Settings) -> int:
+    """Requeue rows that failed transiently, then continue the run.
+
+    The case this exists for: preflight was failing, you fixed the cause (an
+    egress allowlist, a stopped SearXNG), and you want the affected rows
+    reprocessed without re-running the whole file. Rows that already succeeded
+    are untouched, and cached SERP responses mean re-resolving costs nothing.
+    """
+    with Store(settings.db_path) as store:
+        requeued = store.requeue_failed(reset_attempts=args.reset)
+        if not requeued:
+            print("nothing to retry — no deferred or failed rows")
+            return 0
+        print(f"requeued {requeued:,} row(s)")
+
+    if args.no_run:
+        print("run `python main.py resume` to process them")
+        return 0
+    return cmd_resume(args, settings)
+
+
 def cmd_write(args, settings: Settings) -> int:
     with Store(settings.db_path) as store:
         outputs = writer.write_all(store, settings.output_dir)
@@ -449,6 +477,15 @@ def build_parser() -> argparse.ArgumentParser:
     add_input(p)
     p.add_argument("--queries", type=int, help="query count to price (skips reading inputs)")
 
+    p = sub.add_parser(
+        "retry", help="requeue rows that failed transiently, then continue"
+    )
+    add_run_opts(p)
+    p.add_argument("--reset", action="store_true",
+                   help="also requeue rows that exhausted their attempts, clearing the count")
+    p.add_argument("--no-run", action="store_true",
+                   help="requeue only; do not start processing")
+
     sub.add_parser("write", help="regenerate enriched CSVs and the review queue")
     sub.add_parser("report", help="regenerate the QC report")
 
@@ -493,7 +530,7 @@ def main(argv: list[str] | None = None) -> int:
 
     handlers = {
         "ingest": cmd_ingest, "run": cmd_run, "resume": cmd_resume,
-        "preflight": cmd_preflight,
+        "preflight": cmd_preflight, "retry": cmd_retry,
         "dry-run": cmd_dry_run, "estimate": cmd_estimate, "write": cmd_write,
         "report": cmd_report, "suppress": cmd_suppress, "calibrate": cmd_calibrate,
     }
