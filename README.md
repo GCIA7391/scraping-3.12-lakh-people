@@ -383,15 +383,36 @@ the point estimate — 10/10 correct is not evidence of 95% precision.
 ## What to realistically expect
 
 A ≥95%-confidence match needs the company to be identifiable on LinkedIn **and**
-the person to be there under a recognisable form of their registry name. For a
-file dominated by two-person private limited companies, a realistic yield is
-roughly **8–18%** of 312,160 (~25k–56k matches).
+the person to be there under a recognisable form of their registry name. Both
+conditions are rare in this file. Measured over all 312,160 rows:
 
-That is not a defect. Any tool claiming 60–80% on this input is either matching
-on name alone — which the `Debasheesh Bagchi` case shows produces confidently
-wrong answers — or matching on company alone, which the `Synthesis Winding` case
-shows does the same. The review queue is where the remaining recoverable value
-sits, at the cost of human attention rather than false CRM records.
+| Fact | Figure |
+|---|---|
+| Rows at companies with ≤ 2 directors | 187,995 (60.2%) |
+| Rows at companies with ≤ 4 directors | **283,441 (90.8%)** |
+| Rows at companies with ≥ 5 directors | 28,719 (9.2%) |
+| Rows whose name is shared with another row *in this file* | 138,705 (44.4%) |
+
+So for roughly nine rows in ten the company is a small family entity with
+essentially no web footprint, and for nearly half the file the name alone is
+ambiguous within the dataset itself.
+
+**A realistic auto-accept yield is therefore 2–6% of rows (~6,000–19,000
+matches), with a point estimate near 3%.** A further 5–15% should land in the
+review queue. These numbers are reasoned estimates, not measurements — no live
+search has been run against this dataset.
+
+> **If your first live run reports 15–25% matched, treat that as an alarm, not a
+> win.** At this data quality it almost certainly means a reject rule has been
+> weakened or disabled. The deliverable worth trusting is a *measured precision
+> figure on a hand-labelled sample* (see [Calibration](#calibration)), not a row
+> count.
+
+Any tool claiming 60–80% on this input is either matching on name alone — which
+the `Debasheesh Bagchi` case shows produces confidently wrong answers — or on
+company alone, which the `Synthesis Winding` case shows does the same. The review
+queue is where the remaining recoverable value sits, at the cost of human
+attention rather than false CRM records.
 
 Wall-clock for a full run at the default polite 0.5 req/s is roughly **5 days**
 for ~216k queries. That is why checkpoint/resume, the negative cache and the SERP
