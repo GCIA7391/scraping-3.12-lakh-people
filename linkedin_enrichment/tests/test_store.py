@@ -56,8 +56,7 @@ class TestResume:
         seed(store, 5)
         store.claim_batch(5)
         # Simulate claims made well in the past.
-        with store._tx() as conn:  # noqa: SLF001
-            conn.execute("UPDATE records SET claimed_at = ?", (time.time() - 10_000,))
+        store.force_claimed_at(time.time() - 10_000)
 
         assert store.reclaim_stale(900) == 5
         assert store.scalar("SELECT COUNT(*) FROM records WHERE status='pending'") == 5

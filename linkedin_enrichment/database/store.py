@@ -259,6 +259,31 @@ class Store:
                 payload,
             )
 
+    def record_skipped_results(self) -> int:
+        """Give every pre-filtered row a result row carrying its skip reason.
+
+        Skipped rows never reach a worker, but they must still appear in the
+        output with an explanation rather than an unexplained blank. Idempotent:
+        rows that already have a result are left alone.
+        """
+        with self._tx() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO results (row_uid, decision, notes, resolved_at)
+                SELECT r.row_uid, 'blank_skipped', r.skip_reason, ?
+                FROM records r
+                LEFT JOIN results res ON res.row_uid = r.row_uid
+                WHERE r.status = 'skipped' AND res.row_uid IS NULL
+                """,
+                (time.time(),),
+            )
+        return cursor.rowcount
+
+    def force_claimed_at(self, timestamp: float) -> None:
+        """Test hook: backdate every claim so ``reclaim_stale`` can be exercised."""
+        with self._tx() as conn:
+            conn.execute("UPDATE records SET claimed_at = ?", (timestamp,))
+
     def get_result(self, row_uid: str) -> sqlite3.Row | None:
         with self._lock:
             return self._conn.execute(

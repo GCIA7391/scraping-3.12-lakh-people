@@ -316,5 +316,13 @@ def _coerce(raw: str, current: Any) -> Any:
         return float(raw)
     if isinstance(current, (list, tuple)):
         parts = [p.strip() for p in raw.split(",") if p.strip()]
+        # Preserve the element type of the existing value, so a numeric setting
+        # such as retry_status_codes does not silently become a tuple of strings
+        # and stop matching the integer status codes it is compared against.
+        if current and all(isinstance(item, int) for item in current):
+            try:
+                parts = [int(p) for p in parts]
+            except ValueError:
+                pass
         return type(current)(parts)
     return raw

@@ -102,22 +102,8 @@ def ingest(store: Store, settings: Settings) -> dict[str, int]:
         counts["inserted"] += store.insert_records(batch)
 
     # Skipped rows still need an output line explaining themselves.
-    _write_skip_results(store)
+    store.record_skipped_results()
     return counts
-
-
-def _write_skip_results(store: Store) -> None:
-    """Give every pre-filtered row a result row, so the writer has a note to emit."""
-    with store._tx() as conn:  # noqa: SLF001 - internal helper, same module family
-        conn.execute(
-            """
-            INSERT INTO results (row_uid, decision, notes, resolved_at)
-            SELECT r.row_uid, 'blank_skipped', r.skip_reason, strftime('%s','now')
-            FROM records r
-            LEFT JOIN results res ON res.row_uid = r.row_uid
-            WHERE r.status = 'skipped' AND res.row_uid IS NULL
-            """
-        )
 
 
 # ---------------------------------------------------------------------------
