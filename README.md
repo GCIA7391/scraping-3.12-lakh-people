@@ -54,7 +54,9 @@ Two facts drive the whole design:
    usually has an unrelated LinkedIn headline. Designation therefore carries a
    tiny weight and a *mismatch never counts against a candidate*.
 
-2. **The population is mostly micro-companies.** Of 140,351 unique companies,
+2. **The population is mostly micro-companies.** Of 140,351 distinct company
+   strings — 139,548 after brand normalisation collapses legal-form and OCR
+   variants, which is the number the query ladder actually pays for —
    24,947 have one person in the file and 81,524 have exactly two — Indian
    private limited companies legally require two directors. Most have no web
    presence at all. Only a small minority are recognisable names.
@@ -329,8 +331,35 @@ Ingestion is idempotent, so passing `--input` again is harmless.
 
 ## Performance tuning
 
-The bottleneck is always the search provider, never this code — full ingestion
-of 312,160 rows takes 52 seconds at 386 MB peak RSS.
+### Measured at full scale
+
+A complete 312,160-row pass was executed offline against the recorded cassette
+corpus (no network), to validate throughput, the ladder and output integrity:
+
+| Measure | Result |
+|---|---|
+| Ingest | 52 s, 386 MB peak RSS, 252 MB database |
+| Rows in / results out | 312,160 / 312,160 — exact reconciliation |
+| Queries issued | 139,499 (139,489 Tier 1 + 10 Tier 2) vs 613,832 naive |
+| Negative-cache skips | 306,809 rows resolved at **zero** query cost |
+| Company cache hit rate | 54.5% |
+| Search errors / throttles | 0 / 0 |
+| Original columns modified | **0** across all 312,160 rows |
+| Blank rows lacking an explanation | **0** |
+
+Crash safety was verified on the same data: a `SIGKILL` mid-run left
+94 done + 7 claimed + 306,815 pending + 5,244 skipped = 312,160 with zero
+duplicate results, and the resume reclaimed the stale claims and completed
+cleanly.
+
+Only one row matched, which is correct — the offline corpus contains just seven
+recorded searches, so only three companies had any footprint to find. The number
+that matters here is that **306,915 rows were correctly resolved to a blank with
+a stated reason rather than guessed**.
+
+### Tuning
+
+The bottleneck is always the search provider, never this code.
 
 | Symptom | Action |
 |---|---|
