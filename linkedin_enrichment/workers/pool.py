@@ -136,19 +136,39 @@ class WorkerPool:
     async def _produce(self) -> None:
         """Claim batches and feed the queue until work runs out or we stop."""
         while not self._shutdown.is_set():
+            # Precision mode stops as soon as the target is met — the whole point
+            # is to stop early, not to work the pool.
+            #
+            # This is a stop signal, not a hard cap: a batch is already in flight
+            # when the target is reached, so the final count can overshoot by up
+            # to one batch. That is harmless, because the deliverable is the
+            # top-N by confidence (see output/top_matches.py) and extra matches
+            # simply widen the pool it selects from.
+            target = self.settings.target_matches
+            if target and self.progress.matched >= target:
+                logger.info(
+                    "target of %d matches reached; stopping intake", target
+                )
+                break
+
             remaining = None if self.limit is None else self.limit - self._dispatched
             if remaining is not None and remaining <= 0:
                 break
             size = self.settings.batch_size if remaining is None else min(
                 self.settings.batch_size, remaining
             )
-            batch = await asyncio.to_thread(self.store.claim_batch, size)
+            batch = await asyncio.to_thread(
+                self.store.claim_batch, size,
+                ranked=self.settings.precision_mode,
+                preferred_only=self.settings.preferred_roles_only,
+            )
             if not batch:
                 break
             for record in batch:
+                target = self.settings.target_matches
                 if self._shutdown.is_set() or (
                     self.limit is not None and self._dispatched >= self.limit
-                ):
+                ) or (target and self.progress.matched >= target):
                     # Return the rest of this batch rather than holding claims.
                     unstarted = [
                         r["row_uid"] for r in batch

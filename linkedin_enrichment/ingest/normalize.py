@@ -429,6 +429,57 @@ def normalize_company(raw: str) -> NormalizedCompany:
     )
 
 
+# Qualifiers a multinational appends to its Indian subsidiary. LinkedIn shows the
+# parent brand ("HP"), the registry shows the entity ("HP PPS Services India").
+_SUBSIDIARY_QUALIFIERS = frozenset({
+    "india", "indian", "asia", "apac", "global", "international", "worldwide",
+    "services", "solutions", "technologies", "technology", "systems", "software",
+    "development", "centre", "center", "gbs", "pps", "gcc", "rnd", "labs",
+    "operations", "consulting", "holdings", "ventures", "enterprises",
+})
+
+
+def brand_lead_tokens(company: NormalizedCompany, limit: int = 2) -> tuple[str, ...]:
+    """The leading tokens that carry the parent brand.
+
+    "HP PPS Services India Private Limited" -> ("hp",); the rest are subsidiary
+    qualifiers. Used to accept a LinkedIn employer string that names the parent
+    rather than the registered entity.
+
+    Note the deliberate limit of this approach: it strips *qualifiers*, so it
+    handles HP PPS Services India -> HP. It cannot handle a *rename* such as
+    "Sorting Hat Technologies" -> "Unacademy", which shares no tokens at all and
+    would need an alias lookup this pipeline does not have. Those simply stay
+    unmatched rather than being guessed at.
+    """
+    lead: list[str] = []
+    for token in company.tokens:
+        if token in _SUBSIDIARY_QUALIFIERS:
+            continue
+        lead.append(token)
+        if len(lead) >= limit:
+            break
+    return tuple(lead)
+
+
+def brand_alias_match(company: NormalizedCompany, text: str) -> bool:
+    """True if ``text`` names the company's parent brand.
+
+    Requires the *first* distinctive token as a standalone word. Short brands
+    like "HP" are allowed here even though the general token scan skips tokens of
+    two characters or fewer, because as a leading brand token they are
+    meaningful rather than noise — but only as a whole word, so "hp" does not
+    match inside "sharp".
+    """
+    lead = brand_lead_tokens(company, limit=1)
+    if not lead or not text:
+        return False
+    token = lead[0]
+    if len(token) < 2:
+        return False
+    return bool(re.search(rf"\b{re.escape(token)}\b", unidecode(text).lower()))
+
+
 def company_token_coverage(
     company: NormalizedCompany,
     text: str,

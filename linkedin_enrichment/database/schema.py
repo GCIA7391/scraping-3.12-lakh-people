@@ -57,6 +57,11 @@ CREATE TABLE IF NOT EXISTS records (
     skip_reason  TEXT NOT NULL DEFAULT '',
     tier         INTEGER NOT NULL DEFAULT 0,
     attempts     INTEGER NOT NULL DEFAULT 0,
+    -- Offline rank, 0-1000. Precision mode claims highest-first and stops at a
+    -- target, so this decides what gets tried, never what gets written.
+    priority     INTEGER NOT NULL DEFAULT 0,
+    -- 1 when the designation is one of the preferred roles (precision pool).
+    preferred    INTEGER NOT NULL DEFAULT 0,
     last_error   TEXT NOT NULL DEFAULT '',
     claimed_at   REAL,
     updated_at   REAL
@@ -67,6 +72,9 @@ CREATE TABLE IF NOT EXISTS records (
 -- the claim query fast at 312k scale.
 CREATE INDEX IF NOT EXISTS idx_records_pending
     ON records(company_key) WHERE status = 'pending';
+-- Precision mode's claim order: highest priority first among pending rows.
+CREATE INDEX IF NOT EXISTS idx_records_priority
+    ON records(priority DESC, company_key) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_records_status  ON records(status);
 CREATE INDEX IF NOT EXISTS idx_records_company ON records(company_key);
 CREATE INDEX IF NOT EXISTS idx_records_dedup   ON records(dedup_key);
@@ -139,6 +147,15 @@ CREATE INDEX IF NOT EXISTS idx_serp_fetched ON serp_cache(fetched_at);
 CREATE TABLE IF NOT EXISTS suppressions (
     row_uid      TEXT PRIMARY KEY,
     suppressed_at REAL,
+    note         TEXT NOT NULL DEFAULT ''
+);
+
+-- Human verdicts on delivered matches. This is what converts the model's
+-- confidence score into a measured precision with a confidence interval.
+CREATE TABLE IF NOT EXISTS validation_labels (
+    row_uid      TEXT PRIMARY KEY REFERENCES records(row_uid) ON DELETE CASCADE,
+    correct      INTEGER NOT NULL,   -- 1 right person, 0 wrong person
+    labelled_at  REAL,
     note         TEXT NOT NULL DEFAULT ''
 );
 

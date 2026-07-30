@@ -192,6 +192,20 @@ class Settings:
     # Once exhausted the row is finalised with an explicit note.
     max_row_attempts: int = 3
 
+    # --- precision mode ---
+    # Optimises for a small, very-high-confidence deliverable instead of
+    # coverage: ranked claim order, a preferred-role pool, mandatory independent
+    # corroboration, and a stop once `target_matches` matches are found.
+    precision_mode: bool = False
+    #: Stop the run after this many matches (0 = no target).
+    target_matches: int = 0
+    #: Only process rows whose designation is a preferred role.
+    preferred_roles_only: bool = False
+    #: Require a second, independent source naming both person and company.
+    #: Automatically on in precision mode: name+company alone scores 0.9644,
+    #: which clears 95% but fails 99%.
+    require_corroboration: bool = False
+
     # --- decisioning ---
     confidence_threshold: float = 0.95
     # Candidates below the threshold but above this are written to review_queue.csv
@@ -241,8 +255,27 @@ class Settings:
             # CLI wins over everything; drop None so unset flags don't clobber config.
             settings._apply_mapping({k: v for k, v in overrides.items() if v is not None})
 
+        if settings.precision_mode:
+            settings._apply_precision_defaults()
         settings._validate()
         return settings
+
+    def _apply_precision_defaults(self) -> None:
+        """Turn on everything precision mode implies, unless explicitly overridden.
+
+        Kept in one place so `--precision` cannot be partially applied — a run
+        that raised the threshold but forgot corroboration would report 0.99
+        scores it has no second source for.
+        """
+        if self.confidence_threshold < 0.99:
+            self.confidence_threshold = 0.99
+        self.require_corroboration = True
+        self.preferred_roles_only = True
+        if not self.target_matches:
+            self.target_matches = 1000
+        # Near-misses are the point of the review queue here, so keep the floor
+        # well below the (now much higher) threshold.
+        self.review_queue_floor = min(self.review_queue_floor, 0.80)
 
     # ------------------------------------------------------------------
     # Internals

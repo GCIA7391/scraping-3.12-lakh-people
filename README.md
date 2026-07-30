@@ -267,6 +267,93 @@ Key settings:
 | `enable_negative_cache` | true | Skip everyone at footprint-less companies |
 | `llm.enabled` | false | Optional adjudication of borderline candidates |
 
+## Precision mode — ~1,000 profiles at ≥99%
+
+When the goal is a short, defensible list rather than coverage:
+
+```bash
+python main.py preflight
+python main.py run --input data/*.csv --precision --target 1000
+python main.py validate            # hand-label, to measure the precision
+```
+
+`--precision` turns on, together and inseparably:
+
+| | |
+|---|---|
+| Threshold | 0.99 instead of 0.95 |
+| Pool | preferred roles only (Founder/CEO/Chairman/Promoter/MD/ED/Owner/Partner) |
+| Order | highest offline priority first |
+| Corroboration | **mandatory** — an independent non-LinkedIn source naming both person and company |
+| Stop | once `--target` matches are found |
+
+The deliverable is `out/top_matches.csv`, ranked by confidence, each row carrying
+its corroborating source URL.
+
+### Why corroboration becomes mandatory at 99%
+
+An exact name plus an exact company scores **0.9644**. That clears 95% and
+**fails 99%**. So at this bar every match needs a second, independent source —
+which is exactly the "official websites, leadership pages, press coverage"
+preference, promoted from nice-to-have to requirement.
+
+"Independent" excludes ZaubaCorp, Tofler, TheCompanyCheck and similar: they
+republish the same MCA registry the input came from, so agreeing with them is
+the data agreeing with itself. Contact scrapers (RocketReach, ZoomInfo) are
+excluded too — they restate LinkedIn, so they cannot corroborate LinkedIn.
+
+### Expected yield, measured
+
+Live stratified samples, every claimed match adversarially re-checked:
+
+| Stratum | Pool | Hit rate | 95% CI |
+|---|---|---|---|
+| Preferred role @ ≥20 directors | 928 | 2/6 = 33% | 9.7% – 70.0% |
+| Strict exec @ ≥10 directors | 375 | 0/6 = 0% | 0% – 39.0% |
+| **Combined** | 1,303 | **2/12 = 16.7%** | **4.7% – 44.8%** |
+
+Against the 32,951-row preferred pool that projects to **1,600–5,600** matches,
+so a 1,000 target is reachable. Cost ≈ 51,000 queries: ~28 h free, ~1.4 h paid.
+
+Note the strict-exec pool alone is only 2,600 rows — and this file contains **no
+CTO/CFO/COO/CMO rows at all** — so reaching 1,000 from it would need a 38.5% hit
+rate. That is why the pool includes Managing Directors, with strict execs ranked
+first.
+
+### What ranking can and cannot do
+
+Ranking decides what is *tried* first. It cannot improve precision — the reject
+rules do that. Three things were learned building it, each the hard way:
+
+- **Junk names outrank real ones on rarity alone.** "Rockstar Productions" and
+  "Apache Mewr" are as unique as "Thallapragada". Fixed by comparing a token's
+  frequency in *person* names against its frequency in *company* names.
+- **Nobody founds Apple India.** Founder/CEO titles at large captive subsidiaries
+  are registry artifacts and are penalised.
+- **A "meaningless" title is not a meaningless row.** Penalising titles shared by
+  many people at one company — Wells Fargo's 299 executive directors, DSK Legal's
+  38 partners — demoted *both* live-verified matches to the 96th percentile. The
+  rule was removed and is kept as a documented no-op so it is not reintroduced.
+
+### Proving the 99%
+
+The pipeline reports a *calibrated model score*. That is not a measured
+precision, and it should not be quoted as one. `python main.py validate` presents
+each match with its evidence for a one-keystroke verdict and reports the Wilson
+95% lower bound:
+
+| Labelled | Errors | Lower bound |
+|---|---|---|
+| 381 | 0 | **0.9900** |
+| 381 | 1 | 0.9860 |
+| 100 | 0 | 0.9630 |
+
+**381 rows, all correct, is the cheapest honest route to a ≥99% claim.** One
+error and the target moves out of reach at that sample size. Until then the
+report says "model score, precision not yet measured".
+
+At a true 99%, a 1,000-row deliverable still contains ~10 wrong profiles.
+
 ## Usage
 
 **Always start with preflight and a 10-row test.** A run whose searches silently

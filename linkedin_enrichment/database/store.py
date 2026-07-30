@@ -41,11 +41,30 @@ class Store:
         for pragma in PRAGMAS:
             self._conn.execute(pragma)
         self._conn.executescript(DDL)
+        self._migrate()
         self._conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
         )
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a database was first created.
+
+        ``CREATE TABLE IF NOT EXISTS`` silently leaves an existing table alone,
+        so a database from an earlier version would otherwise be missing the new
+        columns and every query touching them would fail.
+        """
+        existing = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(records)")
+        }
+        for column, ddl in (
+            ("priority", "ALTER TABLE records ADD COLUMN priority INTEGER NOT NULL DEFAULT 0"),
+            ("preferred", "ALTER TABLE records ADD COLUMN preferred INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if column not in existing:
+                self._conn.execute(ddl)
+                logger.info("migrated: added records.%s", column)
 
     # ------------------------------------------------------------------
     # Plumbing
@@ -88,6 +107,7 @@ class Store:
                 r.get("location", ""), r.get("industry", ""), r.get("pc_url", ""),
                 r.get("name_norm", ""), r.get("company_key", ""), r.get("dedup_key", ""),
                 r.get("dup_of"), r.get("status", "pending"), r.get("skip_reason", ""),
+                int(r.get("priority", 0)), int(bool(r.get("preferred", 0))),
                 time.time(),
             )
             for r in rows
@@ -101,12 +121,24 @@ class Store:
                     row_uid, source_file, sheet_name, row_index,
                     name, company, designation, location, industry, pc_url,
                     name_norm, company_key, dedup_key, dup_of, status, skip_reason,
-                    updated_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    priority, preferred, updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 payload,
             )
             return cursor.rowcount
+
+    def set_priorities(self, scored: Iterable[tuple[str, int, int]]) -> int:
+        """Bulk-assign (row_uid, priority, preferred). Used by ``main.py rank``."""
+        payload = [(int(p), int(bool(pref)), uid) for uid, p, pref in scored]
+        if not payload:
+            return 0
+        with self._tx() as conn:
+            conn.executemany(
+                "UPDATE records SET priority = ?, preferred = ? WHERE row_uid = ?",
+                payload,
+            )
+        return len(payload)
 
     def has_records(self) -> bool:
         with self._lock:
@@ -135,20 +167,31 @@ class Store:
             logger.info("reclaimed %s stale claim(s)", f"{cursor.rowcount:,}")
         return cursor.rowcount
 
-    def claim_batch(self, limit: int) -> list[sqlite3.Row]:
+    def claim_batch(
+        self, limit: int, *, ranked: bool = False, preferred_only: bool = False,
+    ) -> list[sqlite3.Row]:
         """Atomically claim up to ``limit`` pending rows.
 
-        Rows are ordered by ``company_key`` so a batch tends to contain people
-        from the same company. That maximises company-cache hits within the batch
-        and keeps the Tier-1 roster query shared rather than repeated.
+        Default order is by ``company_key`` so a batch tends to contain people
+        from the same company, maximising company-cache hits and keeping the
+        Tier-1 roster query shared rather than repeated.
+
+        ``ranked`` switches to highest-``priority``-first for precision mode,
+        which works the pool top-down and stops at a target. Company grouping is
+        kept as the secondary key so cache locality is not lost entirely.
         """
         now = time.time()
+        where = "status = 'pending'"
+        if preferred_only:
+            where += " AND preferred = 1"
+        order = "priority DESC, company_key" if ranked else "company_key"
+
         with self._tx() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT row_uid FROM records
-                WHERE status = 'pending'
-                ORDER BY company_key
+                WHERE {where}
+                ORDER BY {order}
                 LIMIT ?
                 """,
                 (limit,),
@@ -606,6 +649,23 @@ class Store:
             )
             yield from cursor
 
+    def top_matches(self, limit: int = 1000) -> list[sqlite3.Row]:
+        """The highest-confidence matches, best first — the precision deliverable."""
+        with self._lock:
+            return self._conn.execute(
+                """
+                SELECT r.row_uid, r.name, r.company, r.designation, r.location,
+                       r.priority,
+                       res.linkedin_url, res.confidence, res.notes, res.source_urls
+                FROM results res
+                JOIN records r ON r.row_uid = res.row_uid
+                WHERE res.decision = 'matched' AND res.linkedin_url <> ''
+                ORDER BY res.confidence DESC, r.priority DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+
     def iter_review_queue(self) -> Iterator[sqlite3.Row]:
         with self._lock:
             cursor = self._conn.execute(
@@ -619,12 +679,73 @@ class Store:
             )
             yield from cursor
 
+    def iter_rankable(self) -> Iterator[sqlite3.Row]:
+        """Every record's ranking inputs, for the two-pass priority scorer."""
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT row_uid, name, company, designation FROM records"
+            )
+            yield from cursor
+
+    def priority_summary(self, top: int = 20) -> list[sqlite3.Row]:
+        with self._lock:
+            return self._conn.execute(
+                """
+                SELECT name, company, designation, priority, preferred
+                FROM records ORDER BY priority DESC, row_uid LIMIT ?
+                """,
+                (top,),
+            ).fetchall()
+
     def source_files(self) -> list[str]:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT DISTINCT source_file FROM records ORDER BY source_file"
             ).fetchall()
         return [r["source_file"] for r in rows]
+
+    # ------------------------------------------------------------------
+    # Validation labels
+    # ------------------------------------------------------------------
+    def put_label(self, row_uid: str, correct: bool, note: str = "") -> None:
+        with self._tx() as conn:
+            conn.execute(
+                """
+                INSERT INTO validation_labels (row_uid, correct, labelled_at, note)
+                VALUES (?,?,?,?)
+                ON CONFLICT(row_uid) DO UPDATE SET
+                    correct=excluded.correct, labelled_at=excluded.labelled_at,
+                    note=excluded.note
+                """,
+                (row_uid, int(bool(correct)), time.time(), note),
+            )
+
+    def label_counts(self) -> tuple[int, int]:
+        """(correct, incorrect) over all stored labels."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COALESCE(SUM(correct),0) AS c, COUNT(*) AS n FROM validation_labels"
+            ).fetchone()
+        correct = int(row["c"] or 0)
+        return correct, int(row["n"] or 0) - correct
+
+    def unlabelled_matches(self, limit: int) -> list[sqlite3.Row]:
+        """Delivered matches not yet judged, highest confidence first."""
+        with self._lock:
+            return self._conn.execute(
+                """
+                SELECT r.row_uid, r.name, r.company, r.designation, r.location,
+                       res.linkedin_url, res.confidence, res.notes, res.source_urls
+                FROM results res
+                JOIN records r ON r.row_uid = res.row_uid
+                LEFT JOIN validation_labels v ON v.row_uid = res.row_uid
+                WHERE res.decision = 'matched' AND res.linkedin_url <> ''
+                  AND v.row_uid IS NULL
+                ORDER BY res.confidence DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
 
     def set_stat(self, run_id: str, key: str, value: Any) -> None:
         with self._tx() as conn:

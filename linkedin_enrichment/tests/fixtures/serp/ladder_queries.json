@@ -35,6 +35,16 @@
     ]
   },
   {
+    "_comment": "CORROBORATION query for the true positive. These results are verbatim from the live search run during design — the query omits the LinkedIn restriction because the whole point is to find a source that is NOT LinkedIn. Crunchbase is editorially maintained and counts; the greythr.com hit is the company's own site under its product brand.",
+    "query": "\"girish rowjee\" \"greytip software\"",
+    "provider": "fixture",
+    "results": [
+      {"title": "Girish Rowjee - Co-Founder & CEO @ greytHR - Crunchbase Person Profile", "url": "https://www.crunchbase.com/person/girish-rowjee", "snippet": "Girish Rowjee is Co-Founder and CEO of Greytip Software, based in Bengaluru.", "rank": 0},
+      {"title": "About Us - Greytip Software Private Limited", "url": "https://www.greythr.com/company/about/", "snippet": "Girish Rowjee co-founded Greytip Software in 1994 and serves as CEO.", "rank": 1},
+      {"title": "Girish Rowjee Email & Phone Number | Greytip Software Pvt. Ltd. CEO", "url": "https://rocketreach.co/girish-rowjee-email_1786181", "snippet": "", "rank": 2}
+    ]
+  },
+  {
     "_comment": "Tier 1 for Ubiqtech Software: the company has no roster on LinkedIn. Establishes the negative cache for case 2.",
     "query": "site:linkedin.com/in \"ubiqtech software\"",
     "provider": "fixture",

@@ -31,13 +31,15 @@ from linkedin_enrichment.cache.serp_cache import SerpCache
 from linkedin_enrichment.config.settings import Settings
 from linkedin_enrichment.database.store import Store
 from linkedin_enrichment.identity.scorer import Decision
+from linkedin_enrichment.identity import priority
 from linkedin_enrichment.ingest import prefilter
 from linkedin_enrichment.ingest.reader import read_all
 from linkedin_enrichment.logging import dashboard as dash
 from linkedin_enrichment.logging import setup as log_setup
 from linkedin_enrichment.output import explain as explain_mod
 from linkedin_enrichment.output import report as report_mod
-from linkedin_enrichment.output import review_queue, writer
+from linkedin_enrichment.output import review_queue, top_matches, writer
+from linkedin_enrichment.output import validate as validate_mod
 from linkedin_enrichment.providers import REGISTRY, build_provider
 from linkedin_enrichment.providers.base import ProviderError
 from linkedin_enrichment.search import preflight as preflight_mod
@@ -224,6 +226,22 @@ def cmd_run(args, settings: Settings) -> int:
             print("no input files given and the database is empty; nothing to do", file=sys.stderr)
             return 2
 
+        # Precision mode claims by priority and filters to the preferred-role
+        # pool, both of which live in columns that only `rank` populates. Without
+        # this, a fresh database would match nothing at all and look like a
+        # finding rather than a missing step.
+        if settings.precision_mode:
+            ranked_already = store.scalar(
+                "SELECT COUNT(*) FROM records WHERE priority > 0"
+            ) or 0
+            if not ranked_already:
+                logger.info("precision mode: ranking records first")
+                counts = rank_records(store)
+                print(
+                    f"ranked {counts['ranked']:,} rows "
+                    f"({counts['preferred']:,} in the preferred-role pool)"
+                )
+
         # Reclaim work abandoned by a previous crash before claiming anything new.
         store.reclaim_stale(settings.stale_claim_seconds)
         # Give rows that failed transiently on an earlier pass another go. This
@@ -238,6 +256,10 @@ def cmd_run(args, settings: Settings) -> int:
 
         outputs = writer.write_all(store, settings.output_dir)
         review_path = review_queue.write_review_queue(store, settings.output_dir)
+        top_path, top_n = top_matches.write_top_matches(
+            store, settings.output_dir,
+            limit=settings.target_matches or 1000,
+        )
 
         stats = store.get_stats(run_id)
         qc = report_mod.build_report(
@@ -251,6 +273,7 @@ def cmd_run(args, settings: Settings) -> int:
 
     print(f"\nenriched files : {', '.join(str(p) for p in outputs)}")
     print(f"review queue   : {review_path}")
+    print(f"top matches    : {top_path}  ({top_n:,} rows)")
     return 0
 
 
@@ -354,6 +377,63 @@ def cmd_estimate(args, settings: Settings) -> int:
     return 0
 
 
+RANK_BATCH = 20_000
+
+
+def rank_records(store: Store) -> dict[str, int]:
+    """Assign every row an offline priority, in two passes.
+
+    Two passes are unavoidable: name rarity is measured against the whole corpus,
+    so nothing can be scored until every row has been seen.
+    """
+    corpus = priority.Corpus()
+    for row in store.iter_rankable():
+        corpus.observe(row["name"], row["company"], row["designation"])
+
+    scored: list[tuple[str, int, int]] = []
+    counts = {"ranked": 0, "preferred": 0, "unrankable": 0}
+    for row in store.iter_rankable():
+        score = priority.score_row(
+            corpus, row["name"], row["company"], row["designation"]
+        )
+        preferred = priority.is_preferred_role(row["designation"])
+        scored.append((row["row_uid"], score, preferred))
+        counts["ranked"] += 1
+        counts["preferred"] += int(preferred)
+        counts["unrankable"] += int(score == 0)
+        if len(scored) >= RANK_BATCH:
+            store.set_priorities(scored)
+            scored.clear()
+    store.set_priorities(scored)
+    return counts
+
+
+def cmd_rank(args, settings: Settings) -> int:
+    """Score and store the offline priority for every row."""
+    with Store(settings.db_path) as store:
+        if settings.input_paths and not store.has_records():
+            ingest(store, settings)
+        if not store.has_records():
+            print("no records — run `ingest` first, or pass --input", file=sys.stderr)
+            return 2
+
+        counts = rank_records(store)
+        print(
+            f"ranked {counts['ranked']:,} rows | "
+            f"{counts['preferred']:,} in the preferred-role pool | "
+            f"{counts['unrankable']:,} unrankable (name is not a person)"
+        )
+        print("\ntop 15 by priority:")
+        print(f"  {'pri':>4}  {'pref':>4}  {'designation':<20} {'name':<30} company")
+        for row in store.priority_summary(15):
+            print(
+                f"  {row['priority']:>4}  {'yes' if row['preferred'] else '  -':>4}  "
+                f"{(row['designation'] or '')[:20]:<20} {row['name'][:30]:<30} "
+                f"{row['company'][:44]}"
+            )
+    return 0
+
+
 def cmd_retry(args, settings: Settings) -> int:
     """Requeue rows that failed transiently, then continue the run.
 
@@ -373,6 +453,68 @@ def cmd_retry(args, settings: Settings) -> int:
         print("run `python main.py resume` to process them")
         return 0
     return cmd_resume(args, settings)
+
+
+def cmd_validate(args, settings: Settings) -> int:
+    """Hand-label delivered matches to measure precision.
+
+    Converts the model's confidence into a number that can be quoted: 381
+    zero-error labels give a Wilson 95% lower bound of exactly 0.9900.
+    """
+    with Store(settings.db_path) as store:
+        total = store.scalar(
+            "SELECT COUNT(*) FROM results WHERE decision='matched' AND linkedin_url<>''"
+        ) or 0
+        if not total:
+            print("no matches to validate — run the pipeline first", file=sys.stderr)
+            return 2
+
+        correct, incorrect = store.label_counts()
+        state = validate_mod.ValidationState(
+            labelled=correct + incorrect, correct=correct, incorrect=incorrect,
+            total_matches=total,
+        )
+
+        if args.report_only:
+            print(validate_mod.render_summary(state, args.target))
+            return 0
+
+        pending = store.unlabelled_matches(args.sample)
+        if not pending:
+            print("every match is already labelled.\n")
+            print(validate_mod.render_summary(state, args.target))
+            return 0
+
+        print(f"{len(pending)} match(es) to review. Answers are saved as you go.\n")
+        for index, row in enumerate(pending, start=1):
+            print(validate_mod.render_row(row, index, len(pending)))
+            try:
+                answer = input("  > ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\ninterrupted — labels so far are saved")
+                break
+
+            if answer.startswith("q"):
+                break
+            if answer.startswith("s"):
+                state.skipped += 1
+                continue
+            if answer.startswith("y"):
+                store.put_label(row["row_uid"], True)
+                state.correct += 1
+                state.labelled += 1
+            elif answer.startswith("n"):
+                store.put_label(row["row_uid"], False)
+                state.incorrect += 1
+                state.labelled += 1
+            else:
+                state.skipped += 1
+                continue
+            print(f"  running lower bound: {state.lower_bound:.4f}\n")
+
+        print()
+        print(validate_mod.render_summary(state, args.target))
+    return 0
 
 
 def cmd_write(args, settings: Settings) -> int:
@@ -451,6 +593,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="print every query, result and accept/reject reason per row")
         sp.add_argument("--force", action="store_true",
                         help="run even if preflight says searches are not working")
+        sp.add_argument("--precision", action="store_true",
+                        help="precision mode: >=0.99, ranked, preferred roles, corroboration required")
+        sp.add_argument("--target", type=int, dest="target_matches",
+                        help="stop once this many matches are found (default 1000 in precision mode)")
 
     p = sub.add_parser("ingest", help="load workbooks into the database")
     add_input(p)
@@ -477,6 +623,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_input(p)
     p.add_argument("--queries", type=int, help="query count to price (skips reading inputs)")
 
+    p = sub.add_parser("rank", help="score every row's offline priority for precision mode")
+    add_input(p)
+
     p = sub.add_parser(
         "retry", help="requeue rows that failed transiently, then continue"
     )
@@ -485,6 +634,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="also requeue rows that exhausted their attempts, clearing the count")
     p.add_argument("--no-run", action="store_true",
                    help="requeue only; do not start processing")
+
+    p = sub.add_parser("validate", help="hand-label matches to measure precision")
+    p.add_argument("--sample", type=int, default=400,
+                   help="how many to present this sitting (381 zero-error labels reach a 0.99 lower bound)")
+    p.add_argument("--target", type=float, default=0.99, help="precision to demonstrate")
+    p.add_argument("--report-only", action="store_true", help="show the bound, label nothing")
 
     sub.add_parser("write", help="regenerate enriched CSVs and the review queue")
     sub.add_parser("report", help="regenerate the QC report")
@@ -512,6 +667,10 @@ def main(argv: list[str] | None = None) -> int:
     }
     if args.no_dashboard:
         overrides["dashboard"] = False
+    if getattr(args, "precision", False):
+        overrides["precision_mode"] = True
+    if getattr(args, "target_matches", None):
+        overrides["target_matches"] = args.target_matches
     if getattr(args, "provider", None):
         overrides["provider"] = {"name": args.provider}
     if getattr(args, "rate", None):
@@ -530,9 +689,10 @@ def main(argv: list[str] | None = None) -> int:
 
     handlers = {
         "ingest": cmd_ingest, "run": cmd_run, "resume": cmd_resume,
-        "preflight": cmd_preflight, "retry": cmd_retry,
+        "preflight": cmd_preflight, "retry": cmd_retry, "rank": cmd_rank,
         "dry-run": cmd_dry_run, "estimate": cmd_estimate, "write": cmd_write,
         "report": cmd_report, "suppress": cmd_suppress, "calibrate": cmd_calibrate,
+        "validate": cmd_validate,
     }
     try:
         return handlers[args.command](args, settings)
