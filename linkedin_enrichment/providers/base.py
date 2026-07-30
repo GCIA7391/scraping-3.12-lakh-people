@@ -16,6 +16,7 @@ import abc
 import hashlib
 import re
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Sequence
 
 
@@ -46,9 +47,42 @@ class SerpResult:
         )
 
 
+class Outcome(str, Enum):
+    """Three-state search outcome.
+
+    ``INCONCLUSIVE`` is the important one. A backend that answers HTTP 200 with
+    zero parseable results is *not* the same as "this person has no profile" —
+    it usually means the instance was throttled, served a consent/CAPTCHA page,
+    or the page markup changed and the parser no longer matches. Collapsing that
+    into "no results" is how a run silently produces 312,160 blanks and looks
+    like it worked.
+    """
+
+    SUCCESS = "success"
+    FAILED = "failed"
+    INCONCLUSIVE = "inconclusive"
+
+
+class FailureKind(str, Enum):
+    """Why a search failed, in the operator's vocabulary."""
+
+    NONE = ""
+    DNS = "dns"
+    CONNECTION_REFUSED = "connection_refused"
+    PROXY_POLICY = "proxy_policy"
+    TLS = "tls"
+    TIMEOUT = "timeout"
+    HTTP_ERROR = "http_error"
+    RATE_LIMITED = "rate_limited"
+    ANTI_BOT = "anti_bot"
+    EMPTY_RESULTS = "empty_results"
+    PARSE_ERROR = "parse_error"
+    CONFIG = "config"
+
+
 @dataclass
 class SearchResponse:
-    """A provider's answer to one query."""
+    """A provider's answer to one query, with enough detail to diagnose it."""
 
     query: str
     results: list[SerpResult] = field(default_factory=list)
@@ -56,15 +90,33 @@ class SearchResponse:
     from_cache: bool = False
     error: str = ""
 
+    # Diagnostics — populated by live backends, surfaced by preflight and --explain.
+    backend: str = ""
+    http_status: int | None = None
+    elapsed_ms: float = 0.0
+    failure_kind: FailureKind = FailureKind.NONE
+    response_bytes: int = 0
+
     @property
     def ok(self) -> bool:
         return not self.error
+
+    @property
+    def outcome(self) -> Outcome:
+        if self.error:
+            return Outcome.FAILED
+        if not self.results:
+            # Reached the backend and got a clean response, but nothing parsed.
+            return Outcome.INCONCLUSIVE
+        return Outcome.SUCCESS
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "query": self.query,
             "provider": self.provider,
             "error": self.error,
+            "backend": self.backend,
+            "http_status": self.http_status,
             "results": [r.to_dict() for r in self.results],
         }
 
@@ -74,17 +126,63 @@ class SearchResponse:
             query=data.get("query", ""),
             provider=data.get("provider", ""),
             error=data.get("error", ""),
+            backend=data.get("backend", "") or "",
+            http_status=data.get("http_status"),
             results=[SerpResult.from_dict(r) for r in data.get("results", [])],
         )
 
 
 class ProviderError(RuntimeError):
-    """Provider failure. ``retryable`` drives the backoff policy."""
+    """Provider failure. ``retryable`` drives the backoff policy, ``kind`` the
+    operator-facing diagnosis printed by ``main.py preflight``."""
 
-    def __init__(self, message: str, *, retryable: bool = False, status: int | None = None):
+    def __init__(
+        self, message: str, *, retryable: bool = False,
+        status: int | None = None, kind: FailureKind = FailureKind.NONE,
+    ):
         super().__init__(message)
         self.retryable = retryable
         self.status = status
+        self.kind = kind
+
+
+def classify_exception(exc: BaseException) -> tuple[FailureKind, str]:
+    """Map a transport exception to a diagnosis an operator can act on.
+
+    The distinctions matter: "connection refused" means *your backend is not
+    running*, while a 403 on CONNECT means *the network policy forbids the host*.
+    Those have completely different fixes, and reporting both as "search failed"
+    is what makes this class of problem take a day to find.
+    """
+    import socket
+
+    text = str(exc)
+    lowered = text.lower()
+
+    if isinstance(exc, socket.gaierror) or "name or service not known" in lowered \
+            or "nodename nor servname" in lowered or "temporary failure in name resolution" in lowered:
+        return FailureKind.DNS, f"DNS lookup failed: {text}"
+
+    if isinstance(exc, ConnectionRefusedError) or "connection refused" in lowered \
+            or "connect call failed" in lowered:
+        return FailureKind.CONNECTION_REFUSED, (
+            f"nothing is accepting connections at that address: {text}"
+        )
+
+    # The agent/egress proxy answers 403 to CONNECT for hosts outside its allowlist.
+    if "tunnel" in lowered or "host not permitted" in lowered or "407" in lowered \
+            or ("403" in lowered and "connect" in lowered) or "proxy" in lowered:
+        return FailureKind.PROXY_POLICY, (
+            f"the network policy refused this host before any request was sent: {text}"
+        )
+
+    if "certificate" in lowered or "ssl" in lowered or "tls" in lowered:
+        return FailureKind.TLS, f"TLS handshake failed: {text}"
+
+    if "timeout" in lowered or "timed out" in lowered:
+        return FailureKind.TIMEOUT, f"the backend did not answer in time: {text}"
+
+    return FailureKind.HTTP_ERROR, text
 
 
 class SearchProvider(abc.ABC):
@@ -95,6 +193,14 @@ class SearchProvider(abc.ABC):
     cost_per_1k: float = 0.0
     #: Provider-imposed hard cap on queries per day (None = unlimited).
     daily_query_cap: int | None = None
+    #: Can a zero-result response be trusted as "there is genuinely nothing"?
+    #:
+    #: True for JSON APIs, which return an explicit empty results array. False
+    #: for HTML-scraped endpoints, where zero parsed results is ambiguous between
+    #: "no matches" and "the markup changed / we were served a challenge page".
+    #: The negative cache is only allowed to record an absence when this is True —
+    #: otherwise one bad response would permanently blank everyone at a company.
+    empty_means_absent: bool = False
 
     def __init__(self, config: Any) -> None:
         self.config = config

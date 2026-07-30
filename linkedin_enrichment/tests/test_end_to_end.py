@@ -169,6 +169,51 @@ class TestResumeMidRun:
             ) == 0
 
 
+class TestLimitAndExplain:
+    """The 10-row-first workflow: never commit to 312k before proving 10."""
+
+    def test_limit_stops_after_n_rows(self, settings, sample_csv: Path) -> None:
+        settings.input_paths = [str(sample_csv)]
+        with Store(settings.db_path) as store:
+            cli.ingest(store, settings)
+            total = store.scalar("SELECT COUNT(*) FROM records WHERE status='pending'")
+            assert total > 3, "sample must be larger than the limit to be a real test"
+
+            asyncio.run(cli.enrich(store, settings, run_id="limited", limit=3))
+
+            processed = store.scalar(
+                "SELECT COUNT(*) FROM results WHERE decision <> 'blank_skipped'"
+            )
+            assert processed == 3
+            # The remainder is untouched and still claimable, so a later run continues.
+            assert store.scalar(
+                "SELECT COUNT(*) FROM records WHERE status='pending'"
+            ) == total - 3
+
+    def test_limited_run_can_be_continued(self, settings, sample_csv: Path) -> None:
+        settings.input_paths = [str(sample_csv)]
+        with Store(settings.db_path) as store:
+            cli.ingest(store, settings)
+            asyncio.run(cli.enrich(store, settings, run_id="a", limit=2))
+            asyncio.run(cli.enrich(store, settings, run_id="b"))
+            assert store.scalar("SELECT COUNT(*) FROM records WHERE status='pending'") == 0
+
+    def test_explain_prints_queries_and_decisions(
+        self, settings, sample_csv: Path, capsys
+    ) -> None:
+        settings.input_paths = [str(sample_csv)]
+        with Store(settings.db_path) as store:
+            cli.ingest(store, settings)
+            asyncio.run(cli.enrich(store, settings, run_id="x", limit=4, explain=True))
+
+        output = capsys.readouterr().out
+        assert "EXPLAIN MODE" in output
+        assert "TIER 1" in output, "the query actually issued must be shown"
+        assert "DECISION" in output
+        # An accept and a reject must both be attributable to a named gate.
+        assert "REJECT" in output or "ACCEPT" in output
+
+
 class TestDryRun:
     def test_dry_run_makes_no_network_calls(self, settings, sample_csv: Path, capsys) -> None:
         """Uses a provider name that would fail immediately if it were contacted."""

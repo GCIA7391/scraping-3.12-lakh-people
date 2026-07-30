@@ -35,10 +35,12 @@ from linkedin_enrichment.ingest import prefilter
 from linkedin_enrichment.ingest.reader import read_all
 from linkedin_enrichment.logging import dashboard as dash
 from linkedin_enrichment.logging import setup as log_setup
+from linkedin_enrichment.output import explain as explain_mod
 from linkedin_enrichment.output import report as report_mod
 from linkedin_enrichment.output import review_queue, writer
 from linkedin_enrichment.providers import REGISTRY, build_provider
 from linkedin_enrichment.providers.base import ProviderError
+from linkedin_enrichment.search import preflight as preflight_mod
 from linkedin_enrichment.search.client import SearchClient
 from linkedin_enrichment.workers.pool import RunProgress, WorkerPool
 from linkedin_enrichment.workers.runner import LadderRunner
@@ -110,7 +112,10 @@ def ingest(store: Store, settings: Settings) -> dict[str, int]:
 # Enrichment
 # ---------------------------------------------------------------------------
 
-async def enrich(store: Store, settings: Settings, run_id: str) -> RunProgress:
+async def enrich(
+    store: Store, settings: Settings, run_id: str,
+    *, limit: int | None = None, explain: bool = False,
+) -> RunProgress:
     """Run the worker pool over every pending row."""
     provider = build_provider(settings.provider.name, settings.provider)
     try:
@@ -125,8 +130,17 @@ async def enrich(store: Store, settings: Settings, run_id: str) -> RunProgress:
     runner = LadderRunner(client, company_cache, settings)
 
     pending = store.scalar("SELECT COUNT(*) FROM records WHERE status = 'pending'") or 0
-    progress = RunProgress(total=pending)
-    pool = WorkerPool(store, runner, settings, progress)
+    total = min(pending, limit) if limit else pending
+    progress = RunProgress(total=total)
+
+    on_row = None
+    if explain:
+        print(explain_mod.render_header(provider.name, limit, settings.confidence_threshold))
+
+        def on_row(outcome, position):  # noqa: F811 - deliberate local binding
+            print(explain_mod.render_row(outcome, settings, position, total))
+
+    pool = WorkerPool(store, runner, settings, progress, limit=limit, on_row=on_row)
 
     logger.info(
         "starting run %s: %s pending rows, provider=%s, workers=%d, threshold=%.2f",
@@ -134,8 +148,13 @@ async def enrich(store: Store, settings: Settings, run_id: str) -> RunProgress:
     )
 
     try:
-        async with dash.Dashboard(progress, client, runner, enabled=settings.dashboard):
+        # The live dashboard and the explain stream both own stdout; explain wins.
+        async with dash.Dashboard(
+            progress, client, runner, enabled=settings.dashboard and not explain
+        ):
             await pool.run()
+        if explain:
+            print(explain_mod.render_footer(progress, client))
     finally:
         await client.close()
 
@@ -165,9 +184,34 @@ def cmd_ingest(args, settings: Settings) -> int:
     return 0
 
 
+def cmd_preflight(args, settings: Settings) -> int:
+    """Prove the search layer works before committing to a long run."""
+    report = preflight_mod.preflight_blocking(settings, deep=not getattr(args, "shallow", False))
+    print(preflight_mod.render(report))
+    return report.exit_code
+
+
 def cmd_run(args, settings: Settings) -> int:
     run_id = settings.run_id or uuid.uuid4().hex[:12]
     started = time.time()
+    limit = getattr(args, "limit", None)
+    explain = bool(getattr(args, "explain", False))
+    force = bool(getattr(args, "force", False))
+
+    # Gate: a run that cannot search produces blanks that look like findings.
+    # Skipped for the cassette provider, which is offline by design.
+    if settings.provider.name != "cassette" and not force:
+        report = preflight_mod.preflight_blocking(settings)
+        if report.exit_code != 0:
+            print(preflight_mod.render(report), file=sys.stderr)
+            print(
+                "\nRefusing to start: searches are not working, so every row would be "
+                "blanked for the wrong reason.\nFix the problem above, or re-run with "
+                "--force if you are certain.",
+                file=sys.stderr,
+            )
+            return report.exit_code
+        logger.info("preflight passed; starting run")
 
     with Store(settings.db_path) as store:
         if settings.input_paths:
@@ -183,7 +227,7 @@ def cmd_run(args, settings: Settings) -> int:
         # Reclaim work abandoned by a previous crash before claiming anything new.
         store.reclaim_stale(settings.stale_claim_seconds)
 
-        asyncio.run(enrich(store, settings, run_id))
+        asyncio.run(enrich(store, settings, run_id, limit=limit, explain=explain))
 
         outputs = writer.write_all(store, settings.output_dir)
         review_path = review_queue.write_review_queue(store, settings.output_dir)
@@ -373,6 +417,12 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--threshold", type=float, dest="confidence_threshold",
                         help="minimum confidence to write a profile (default 0.95)")
         sp.add_argument("--rate", type=float, help="requests per second")
+        sp.add_argument("--limit", type=int,
+                        help="process at most N rows — use this for a small first test")
+        sp.add_argument("--explain", action="store_true",
+                        help="print every query, result and accept/reject reason per row")
+        sp.add_argument("--force", action="store_true",
+                        help="run even if preflight says searches are not working")
 
     p = sub.add_parser("ingest", help="load workbooks into the database")
     add_input(p)
@@ -383,6 +433,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("resume", help="continue an interrupted run")
     add_run_opts(p)
+
+    p = sub.add_parser(
+        "preflight",
+        help="check that searches actually work, and say precisely why if not",
+    )
+    p.add_argument("--provider", choices=sorted(REGISTRY), help="provider to test")
+    p.add_argument("--shallow", action="store_true",
+                   help="skip the DNS/TCP/TLS stage checks")
 
     p = sub.add_parser("dry-run", help="project query volume without searching")
     add_input(p)
@@ -435,6 +493,7 @@ def main(argv: list[str] | None = None) -> int:
 
     handlers = {
         "ingest": cmd_ingest, "run": cmd_run, "resume": cmd_resume,
+        "preflight": cmd_preflight,
         "dry-run": cmd_dry_run, "estimate": cmd_estimate, "write": cmd_write,
         "report": cmd_report, "suppress": cmd_suppress, "calibrate": cmd_calibrate,
     }

@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 
 from ..cache.serp_cache import SerpCache
-from ..providers.base import ProviderError, SearchProvider, SearchResponse
+from ..providers.base import Outcome, ProviderError, SearchProvider, SearchResponse
 from .ratelimit import AdaptiveRateLimiter
 from .retry import with_retry
 
@@ -29,6 +29,9 @@ class SearchClient:
         self.queries_issued = 0
         self.queries_served_from_cache = 0
         self.errors = 0
+        #: HTTP 200 with nothing parseable. Tracked separately from errors because
+        #: a run with many of these is not trustworthy even though it "succeeded".
+        self.inconclusive = 0
 
     async def search(self, query: str) -> SearchResponse:
         """Return results for ``query``, from cache when possible.
@@ -67,6 +70,29 @@ class SearchClient:
 
         self.queries_issued += 1
         self.limiter.on_success()
+
+        # Log every issued query, not just failures. On a multi-day run this is
+        # the only way to audit afterwards what was actually asked and answered.
+        logger.info(
+            "search issued", extra={
+                "query": query,
+                "provider": response.provider,
+                "backend": response.backend,
+                "http_status": response.http_status,
+                "results": len(response.results),
+                "elapsed_ms": round(response.elapsed_ms, 1),
+                "outcome": response.outcome.value,
+            },
+        )
+        if response.outcome is Outcome.INCONCLUSIVE:
+            # Reached the backend, parsed nothing. Distinct from "no match".
+            self.inconclusive += 1
+            logger.warning(
+                "search returned no parseable results for %r (backend=%s status=%s) — "
+                "this is INCONCLUSIVE, not a confirmed absence",
+                query[:80], response.backend, response.http_status,
+            )
+
         self.cache.put(response)
         return response
 
@@ -75,6 +101,7 @@ class SearchClient:
             "queries_issued": self.queries_issued,
             "queries_from_cache": self.queries_served_from_cache,
             "search_errors": self.errors,
+            "inconclusive_searches": self.inconclusive,
             "throttle_events": self.limiter.throttle_events,
             "current_rate_per_second": round(self.limiter.rate, 4),
             **self.cache.stats(),

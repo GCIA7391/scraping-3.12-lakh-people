@@ -1,5 +1,14 @@
 [
   {
+    "_comment": "PREFLIGHT CANARY. Keyed to preflight.CANARY_QUERY so the cassette provider can demonstrate a SUCCESS verdict offline. Same recorded payload as case 1 in real_validated.json.",
+    "query": "\"Girish Rowjee\" \"Greytip Software\" LinkedIn",
+    "provider": "fixture",
+    "results": [
+      {"title": "Girish Rowjee - Greytip Software Pvt. Ltd. | LinkedIn", "url": "https://www.linkedin.com/in/girishrowjee/", "snippet": "Bengaluru, Karnataka, India", "rank": 0},
+      {"title": "Greytip Software Pvt. Ltd. | LinkedIn", "url": "https://www.linkedin.com/company/greytip-software-pvt-ltd-", "snippet": "", "rank": 1}
+    ]
+  },
+  {
     "_comment": "Ladder-keyed cassettes. The result payloads are the SAME recorded real responses as in real_validated.json; only the query keys differ, because query_builder emits normalised brand/name forms. Keeping the two files separate preserves real_validated.json as a pristine record of what was actually observed live.",
     "query": "site:linkedin.com/in \"greytip software\"",
     "provider": "fixture",

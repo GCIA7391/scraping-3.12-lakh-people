@@ -85,6 +85,7 @@ class SearxngProvider(_AiohttpProvider):
 
     name = "searxng"
     cost_per_1k = 0.0
+    empty_means_absent = True
 
     async def search(self, query: str, *, limit: int = 10) -> SearchResponse:
         base = (self.config.searxng_url or "").rstrip("/")
@@ -124,6 +125,7 @@ class GoogleCseProvider(_AiohttpProvider):
 
     name = "google_cse"
     cost_per_1k = 5.0
+    empty_means_absent = True
     daily_query_cap = 10_000
 
     async def search(self, query: str, *, limit: int = 10) -> SearchResponse:
@@ -159,6 +161,7 @@ class SerperProvider(_AiohttpProvider):
 
     name = "serper"
     cost_per_1k = 1.0
+    empty_means_absent = True
 
     async def search(self, query: str, *, limit: int = 10) -> SearchResponse:
         payload = await self._request_json(
@@ -190,6 +193,7 @@ class SerpApiProvider(_AiohttpProvider):
 
     name = "serpapi"
     cost_per_1k = 15.0
+    empty_means_absent = True
 
     async def search(self, query: str, *, limit: int = 10) -> SearchResponse:
         payload = await self._request_json(
@@ -226,6 +230,7 @@ class DuckDuckGoProvider(SearchProvider):
 
     name = "duckduckgo"
     cost_per_1k = 0.0
+    empty_means_absent = True
 
     async def search(self, query: str, *, limit: int = 10) -> SearchResponse:
         def _blocking() -> list[dict[str, Any]]:

@@ -73,15 +73,23 @@ class RunProgress:
 class WorkerPool:
     """Claims batches, runs them concurrently, and checkpoints every result."""
 
-    def __init__(self, store, runner: LadderRunner, settings, progress: RunProgress) -> None:
+    def __init__(
+        self, store, runner: LadderRunner, settings, progress: RunProgress,
+        *, limit: int | None = None, on_row=None,
+    ) -> None:
         self.store = store
         self.runner = runner
         self.settings = settings
         self.progress = progress
+        #: Stop after this many rows (``--limit``). None means process everything.
+        self.limit = limit
+        #: Optional callback invoked with each RowOutcome (``--explain``).
+        self.on_row = on_row
 
         self._shutdown = asyncio.Event()
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=settings.workers * 2)
         self._inflight: set[str] = set()
+        self._dispatched = 0
 
     # ------------------------------------------------------------------
     def request_shutdown(self, reason: str = "signal") -> None:
@@ -124,21 +132,28 @@ class WorkerPool:
     async def _produce(self) -> None:
         """Claim batches and feed the queue until work runs out or we stop."""
         while not self._shutdown.is_set():
-            batch = await asyncio.to_thread(
-                self.store.claim_batch, self.settings.batch_size
+            remaining = None if self.limit is None else self.limit - self._dispatched
+            if remaining is not None and remaining <= 0:
+                break
+            size = self.settings.batch_size if remaining is None else min(
+                self.settings.batch_size, remaining
             )
+            batch = await asyncio.to_thread(self.store.claim_batch, size)
             if not batch:
                 break
             for record in batch:
-                if self._shutdown.is_set():
+                if self._shutdown.is_set() or (
+                    self.limit is not None and self._dispatched >= self.limit
+                ):
                     # Return the rest of this batch rather than holding claims.
-                    remaining = [
+                    unstarted = [
                         r["row_uid"] for r in batch
                         if r["row_uid"] not in self._inflight
                     ]
-                    await asyncio.to_thread(self.store.release, remaining)
+                    await asyncio.to_thread(self.store.release, unstarted)
                     return
                 self._inflight.add(record["row_uid"])
+                self._dispatched += 1
                 await self._queue.put(record)
 
     async def _consume(self, worker_id: int) -> None:
@@ -167,6 +182,13 @@ class WorkerPool:
             try:
                 await asyncio.to_thread(self._persist, outcome)
                 self.progress.record(outcome)
+                if self.on_row is not None:
+                    # Presentation only — a failure here must not lose a result
+                    # that has already been persisted.
+                    try:
+                        self.on_row(outcome, self.progress.processed)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("explain callback failed for row %s", row_uid)
             finally:
                 self._inflight.discard(row_uid)
                 self._queue.task_done()

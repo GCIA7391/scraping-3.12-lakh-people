@@ -137,8 +137,15 @@ class RetryConfig:
 
 @dataclass
 class ProviderConfig:
-    name: str = "searxng"                 # free + self-hosted is the shipped default
-    searxng_url: str = "http://localhost:8080"
+    # public_search needs no key, no account and no self-hosting, so a fresh
+    # checkout can attempt a real search immediately. It is a composite over
+    # several key-free endpoints; see providers/public_search.py.
+    name: str = "public_search"
+    #: Backend order for public_search — first one to return results wins.
+    public_backends: tuple[str, ...] = ("ddg_html", "ddg_lite", "mojeek", "searxng")
+    #: Only used when a SearXNG instance is available (as a public_search
+    #: backend, or on its own via `--provider searxng`).
+    searxng_url: str = ""
     google_cse_id: str = ""
     google_api_key: str = ""
     serper_api_key: str = ""

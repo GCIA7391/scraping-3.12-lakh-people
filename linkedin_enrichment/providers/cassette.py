@@ -27,6 +27,7 @@ class CassetteProvider(SearchProvider):
 
     name = "cassette"
     cost_per_1k = 0.0
+    empty_means_absent = True
 
     def __init__(self, config: Any, *, strict: bool = False) -> None:
         super().__init__(config)

@@ -11,7 +11,10 @@ class TestDefaults:
     def test_defaults_are_valid(self) -> None:
         config = Settings.load()
         assert config.confidence_threshold == 0.95
-        assert config.provider.name == "searxng", "the free provider must be the default"
+        assert config.provider.name == "public_search", (
+            "the key-free provider must be the default"
+        )
+        assert config.provider.public_backends, "public_search needs a backend order"
         assert config.llm.enabled is False, "the LLM stage must be opt-in"
 
     def test_weights_sum_to_one(self) -> None:

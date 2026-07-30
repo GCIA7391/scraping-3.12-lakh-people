@@ -121,6 +121,9 @@ class MatchResult:
     runner_up_score: float = 0.0
     margin: float = 0.0
     review_candidates: list[ScoredCandidate] = field(default_factory=list)
+    #: Every candidate that was scored, accepted or rejected, in SERP order.
+    #: Populated for --explain; carries no cost beyond holding the references.
+    candidates: list[ScoredCandidate] = field(default_factory=list)
 
     @property
     def matched(self) -> bool:
@@ -227,8 +230,20 @@ def score_candidate(subject: Subject, result: SerpResult, settings) -> ScoredCan
 
 
 def resolve(subject: Subject, results: list[SerpResult], settings) -> MatchResult:
-    """Score every result and produce the final decision for one person."""
+    """Score every result and produce the final decision for one person.
+
+    Thin wrapper over ``_resolve`` that attaches the full candidate list to the
+    outcome, so ``--explain`` can show why each result was accepted or rejected
+    without the decision logic having to know anything about presentation.
+    """
     scored = [score_candidate(subject, r, settings) for r in results]
+    outcome = _resolve(subject, scored, settings)
+    outcome.candidates = scored
+    return outcome
+
+
+def _resolve(subject: Subject, scored: list[ScoredCandidate], settings) -> MatchResult:
+    """The decision itself, over already-scored candidates."""
     survivors = sorted(
         (c for c in scored if not c.rejected), key=lambda c: -c.raw_score
     )
@@ -246,7 +261,7 @@ def resolve(subject: Subject, results: list[SerpResult], settings) -> MatchResul
             decision=Decision.BLANK_NO_CANDIDATE,
             notes="no search result passed the name and company evidence gates",
             review_candidates=near_misses[:3],
-            source_urls=[r.url for r in results[:3]],
+            source_urls=[c.result.url for c in scored[:3]],
         )
 
     top = survivors[0]

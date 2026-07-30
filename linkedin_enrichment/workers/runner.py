@@ -16,7 +16,7 @@ Cost per person, in the common cases:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..cache.company_cache import CompanyCache
 from ..identity.scorer import Decision, MatchResult, Subject, resolve
@@ -35,6 +35,21 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class QueryTrace:
+    """One query as issued, for --explain and the audit log."""
+
+    tier: int
+    text: str
+    backend: str = ""
+    http_status: int | None = None
+    result_count: int = 0
+    elapsed_ms: float = 0.0
+    outcome: str = ""
+    error: str = ""
+    from_cache: bool = False
+
+
+@dataclass
 class RowOutcome:
     """What happened to one row, ready to be written to the store."""
 
@@ -43,6 +58,9 @@ class RowOutcome:
     queries_used: int = 0
     tier: int = 0
     error: str = ""
+    #: Every query issued for this row, in order. Empty unless tracing is on.
+    traces: list[QueryTrace] = field(default_factory=list)
+    subject: Subject | None = None
 
 
 class LadderRunner:
@@ -57,15 +75,41 @@ class LadderRunner:
         self.tier2_queries = 0
         self.negative_cache_skips = 0
         self.roster_resolutions = 0
+        #: Rows deferred because the company lookup could not be trusted.
+        self.unverified_company_skips = 0
+
+    async def _traced_search(self, query_text: str, tier: int, traces: list[QueryTrace]):
+        """Issue a query and record exactly what came back.
+
+        Every network call in the ladder goes through here, so --explain and the
+        audit log can never disagree with what was actually requested.
+        """
+        response = await self.client.search(query_text)
+        traces.append(QueryTrace(
+            tier=tier, text=query_text, backend=response.backend,
+            http_status=response.http_status, result_count=len(response.results),
+            elapsed_ms=response.elapsed_ms, outcome=response.outcome.value,
+            error=response.error, from_cache=response.from_cache,
+        ))
+        return response
 
     async def resolve_row(self, record) -> RowOutcome:
-        """Drive one record to a decision."""
-        row_uid = record["row_uid"]
+        """Drive one record to a decision, recording every query it issues."""
         subject = Subject.from_fields(
-            row_uid,
+            record["row_uid"],
             record["name"], record["company"],
             record["location"], record["industry"], record["designation"],
         )
+        traces: list[QueryTrace] = []
+        outcome = await self._resolve_row(record, subject, traces)
+        outcome.traces = traces
+        outcome.subject = subject
+        return outcome
+
+    async def _resolve_row(
+        self, record, subject: Subject, traces: list[QueryTrace]
+    ) -> RowOutcome:
+        row_uid = record["row_uid"]
         queries = 0
 
         if subject.name.is_empty or subject.company.is_empty:
@@ -80,15 +124,41 @@ class LadderRunner:
         cached = self.companies.get(company_key) if self.settings.enable_negative_cache else None
 
         if cached is None or not cached.searched:
+            trustworthy = True
             if self.settings.enable_company_tier:
-                roster, used = await self._fetch_company_roster(subject, company_key)
+                roster, used, trustworthy = await self._fetch_company_roster(
+                    subject, company_key, traces
+                )
                 queries += used
                 self.tier1_queries += used
             else:
                 roster = []
+
             has_footprint = roster_covers_company(
                 roster, subject.company, subject.name_tokens
             )
+
+            if not trustworthy:
+                # The roster query failed or came back unparseable. We do NOT know
+                # whether this company has a presence, and writing has_footprint=0
+                # here would permanently blank every person at it on the strength
+                # of one bad response. Leave the cache untouched and fail the row
+                # so it is retried on the next pass.
+                self.unverified_company_skips += 1
+                return RowOutcome(
+                    row_uid,
+                    MatchResult(
+                        Decision.BLANK_ERROR,
+                        notes=(
+                            "company lookup was inconclusive (the search backend did "
+                            "not return usable results); not recorded as absent — "
+                            "this row will be retried"
+                        ),
+                    ),
+                    queries_used=queries, tier=int(Tier.COMPANY_ROSTER),
+                    error="inconclusive company lookup",
+                )
+
             self.companies.put(
                 company_key,
                 brand_name=subject.company.brand,
@@ -138,7 +208,7 @@ class LadderRunner:
             )
 
         query = person_query(subject.name, subject.company, record["location"])
-        response = await self.client.search(query.text)
+        response = await self._traced_search(query.text, int(Tier.PERSON), traces)
         queries += 1
         self.tier2_queries += 1
 
@@ -148,7 +218,7 @@ class LadderRunner:
             # without the operator. Precision is unaffected — the reject rules
             # still discard every non-LinkedIn URL.
             fallback = person_fallback_query(subject.name, subject.company)
-            response = await self.client.search(fallback.text)
+            response = await self._traced_search(fallback.text, int(Tier.PERSON), traces)
             queries += 1
             self.tier2_queries += 1
             results = list(response.results)
@@ -167,16 +237,32 @@ class LadderRunner:
         return RowOutcome(row_uid, match, queries_used=queries, tier=int(Tier.PERSON))
 
     async def _fetch_company_roster(
-        self, subject: Subject, company_key: str
-    ) -> tuple[list[SerpResult], int]:
-        """Tier 1: one query whose answer is shared by everyone at the company."""
+        self, subject: Subject, company_key: str, traces: list[QueryTrace]
+    ) -> tuple[list[SerpResult], int, bool]:
+        """Tier 1: one query whose answer is shared by everyone at the company.
+
+        Returns ``(roster, queries_used, trustworthy)``. ``trustworthy`` is False
+        when the answer cannot be relied on to mean "this company has no
+        presence" — an error, or an empty response from a backend that cannot
+        distinguish "no results" from "we failed to parse the page".
+        """
         query = company_roster_query(subject.company)
-        response = await self.client.search(query.text)
+        response = await self._traced_search(query.text, int(Tier.COMPANY_ROSTER), traces)
+
         if response.error:
             logger.warning("roster query failed for %s: %s", company_key, response.error)
-            return [], 1
+            return [], 1, False
+
         roster = [r for r in dedupe_results(response.results) if is_profile_url(r.url)]
-        return roster, 1
+
+        if not response.results and not self.client.provider.empty_means_absent:
+            logger.warning(
+                "roster query for %s returned nothing from an HTML backend — "
+                "treating as inconclusive rather than as an absence", company_key,
+            )
+            return roster, 1, False
+
+        return roster, 1, True
 
     def stats(self) -> dict[str, int]:
         return {
@@ -184,4 +270,5 @@ class LadderRunner:
             "tier2_person_queries": self.tier2_queries,
             "negative_cache_skips": self.negative_cache_skips,
             "resolved_from_roster": self.roster_resolutions,
+            "unverified_company_skips": self.unverified_company_skips,
         }

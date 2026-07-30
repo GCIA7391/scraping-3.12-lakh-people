@@ -157,18 +157,46 @@ pytest                     # 119 tests, no network required
 
 Python 3.11+.
 
-### Setting up a free search provider
+### Search providers
 
-The default provider is a **self-hosted SearXNG**, which is free:
+The default is **`public_search`**: a composite over key-free public endpoints.
+No API key, no account, no self-hosting — a fresh checkout can attempt a real
+search immediately. It tries each backend in order until one returns results:
+
+| Backend | Endpoint |
+|---|---|
+| `ddg_html` | `html.duckduckgo.com/html/` |
+| `ddg_lite` | `lite.duckduckgo.com/lite/` |
+| `mojeek` | `www.mojeek.com/search` |
+| `searxng` | your instance, if `SEARXNG_URL` is set |
+
+Run `python main.py preflight` to see which are reachable from your machine.
+
+All providers:
+
+| Provider | Cost | Notes |
+|---|---|---|
+| `public_search` | free | **Default.** Multi-backend, key-free |
+| `searxng` | free | A single self-hosted instance |
+| `duckduckgo` | free | Via the `ddgs` package (`pip install ddgs`) |
+| `google_cse` | 100/day free, then $5/1k | Most ToS-clean. 10k/day ceiling |
+| `serper` | ~$1/1k | Cheapest paid option, no daily cap |
+| `serpapi` | ~$15/1k | Most robust, highest cost |
+| `cassette` | free | Offline replay for tests |
+
+Switching is one flag: `--provider serper`, plus the matching key in the
+environment. Verify pricing before a large paid run — SERP vendors change terms
+often.
+
+#### Optional: your own SearXNG
 
 ```bash
-docker run -d -p 8080:8080 \
-  -e SEARXNG_SETTINGS_PATH=/etc/searxng/settings.yml \
-  searxng/searxng
+docker run -d -p 8080:8080 searxng/searxng
 export SEARXNG_URL=http://localhost:8080
 ```
 
-Enable the JSON API in the instance's `settings.yml`:
+Enable the JSON API in the instance's `settings.yml`, or every query fails with a
+config error telling you exactly this:
 
 ```yaml
 search:
@@ -180,18 +208,27 @@ search:
 > Azure) fastest. An instance on a hyperscaler IP can start returning empty
 > results within a few dozen queries.
 
-Alternatives:
+### Why "no results" is never reported as "no profile"
 
-| Provider | Cost | Notes |
-|---|---|---|
-| `searxng` | free | Default. Self-hosted; you own the rate limiting |
-| `duckduckgo` | free | No key (`pip install ddgs`). Throttles hard under load |
-| `google_cse` | 100/day free, then $5/1k | Most ToS-clean. 10k/day ceiling |
-| `serper` | ~$1/1k | Cheapest paid option, no daily cap |
-| `serpapi` | ~$15/1k | Most robust, highest cost |
-| `cassette` | free | Offline replay for tests |
+Three outcomes, not two:
 
-Verify pricing before a large paid run — SERP vendors change terms often.
+| Outcome | Meaning |
+|---|---|
+| **SUCCESS** | Results returned and parsed |
+| **FAILED** | The backend could not be reached, or refused |
+| **INCONCLUSIVE** | HTTP 200, but nothing parseable came back |
+
+INCONCLUSIVE is the dangerous one. It usually means a throttle, a challenge page,
+or a markup change — *not* that the person has no profile. Two rules follow:
+
+- The **negative cache refuses to record an absence** it cannot verify. Only a
+  backend that returns an explicit empty result set (a JSON API) may establish
+  that a company has no LinkedIn presence. An HTML-scraped empty page defers the
+  row for retry instead, because one bad response would otherwise permanently
+  blank every person at that company.
+- A `403` from a **firewall** is distinguished from a `403` from the **search
+  engine** — by deny header and body text. They need opposite responses, and
+  conflating them sends you rotating user-agents against a network allowlist.
 
 ## Configuration
 
@@ -230,12 +267,32 @@ Key settings:
 
 ## Usage
 
+**Always start with preflight and a 10-row test.** A run whose searches silently
+return nothing still completes "successfully", writing a blank and a reason for
+every row — output that looks like a finding when it is actually an
+infrastructure fault. The first two commands exist to make that impossible.
+
+```bash
+# 1. Can this machine actually search? Says precisely why if not.
+python main.py preflight
+#    exit 0 = go, 1 = all backends failed, 2 = reachable but returned nothing
+
+# 2. Prove it on 10 rows, showing every query and every accept/reject decision.
+python main.py run --input data/*.csv --limit 10 --explain
+
+# 3. Only then, the full run.
+python main.py run --input data/*.csv
+```
+
+`run` calls preflight itself and refuses to start if it fails; `--force`
+overrides that if you are certain.
+
 ```bash
 # See what the run will cost before spending anything — no network calls
 python main.py dry-run  --input data/*.csv
 python main.py estimate --input data/*.csv
 
-# Run it. Re-running the same command resumes; it never redoes finished work.
+# Re-running the same command resumes; it never redoes finished work.
 python main.py run --input data/*.csv
 
 # Continue after an interruption
@@ -399,10 +456,25 @@ the point estimate — 10/10 correct is not evidence of 95% precision.
 
 ## Troubleshooting
 
+**Start here: `python main.py preflight`.** It classifies the failure and prints
+the remedy, which is faster than reading this table.
+
+| Preflight classification | What it means | Fix |
+|---|---|---|
+| `proxy_policy` | A firewall refused the host; the search engine was never reached. **Not** anti-bot | Add the host to your network egress allowlist, or run from a network that permits search engines. No provider or user-agent change helps |
+| `connection_refused` | Nothing is listening at that address | Usually SearXNG not running: `docker run -d -p 8080:8080 searxng/searxng` |
+| `anti_bot` | The engine served a challenge/consent page | Try another backend, lower the rate, or use a paid API |
+| `rate_limited` | Throttled | Lower `rate_limit.requests_per_second`; the limiter also backs off on its own |
+| `empty_results` | HTTP 200, nothing parsed | Markup changed or the page was empty. **Not** proof that no profiles exist — do not run in bulk |
+| `config` | e.g. SearXNG serving HTML because `json` is missing from `search.formats` | Fix the setting named in the message |
+| `dns` / `tls` / `timeout` | Transport-level | Check resolver, CA bundle, or raise the timeout |
+
 | Message | Cause and fix |
 |---|---|
 | `SearXNG selected but no URL set` | `export SEARXNG_URL=http://localhost:8080` |
-| Every row is `blank_no_candidate` | Provider is returning nothing. Test it: `curl "$SEARXNG_URL/search?q=test&format=json"`. If that fails, JSON output is not enabled in `settings.yml` |
+| Refusing to start: searches are not working | Preflight failed. Fix the cause above, or `--force` if you are certain |
+| Every row is `blank_no_candidate` | Run `preflight`. If it passes, this is genuine — see [expected yield](#what-to-realistically-expect) |
+| Many rows `blank_error` with "inconclusive" | The backend is unreliable. Those rows were deliberately *not* cached as absent and will retry on the next run |
 | `duckduckgo: 202 Ratelimit` | Expected under load. The limiter backs off automatically; lower the configured rate if it persists |
 | `scoring weights must sum to 1.0` | Custom weights in your config do not total 1.0 |
 | Run seems stuck | Check `logs/enrichment.jsonl`. A very low adapted rate means the provider is throttling |
