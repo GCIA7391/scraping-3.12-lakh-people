@@ -18,7 +18,10 @@ BAR = "=" * 78
 #: decision -> (bucket label, what to do about it)
 _BUCKETS: dict[str, tuple[str, str]] = {
     "matched": (
-        "Accepted", "these are the deliverable"),
+        "Accepted — LinkedIn profile confirmed", "these are the deliverable"),
+    "contact_route_only": (
+        "Accepted — professional contact route",
+        "no profile cleared the identity gate, but the row has a published way in"),
     "blank_skipped": (
         "Rejected before searching",
         "name is not a person, or too little signal to disambiguate"),
@@ -39,10 +42,21 @@ _BUCKETS: dict[str, tuple[str, str]] = {
 }
 
 
+#: Decisions that count as delivered. Everything else is a loss.
+_ACCEPTED = ("matched", "contact_route_only")
+
+
 @dataclass
 class Bottleneck:
     target: int = 0
+    #: Total deliverables — profiles plus contact-route-only rows.
     accepted: int = 0
+    #: Of those, how many carry a confirmed LinkedIn profile.
+    profiles: int = 0
+    #: ...and how many are delivered on published routes alone.
+    contact_only: int = 0
+    rows_with_routes: int = 0
+    route_types: dict[str, int] = field(default_factory=dict)
     total_rows: int = 0
     processed: int = 0
     unprocessed: int = 0
@@ -51,6 +65,7 @@ class Bottleneck:
     inconclusive: int = 0
     companies_searched: int = 0
     companies_with_footprint: int = 0
+    companies_with_routes: int = 0
 
     @property
     def target_met(self) -> bool:
@@ -59,7 +74,7 @@ class Bottleneck:
     @property
     def primary(self) -> tuple[str, int]:
         """The bucket that consumed the most rows, excluding accepted ones."""
-        losses = {k: v for k, v in self.buckets.items() if k != "matched" and v}
+        losses = {k: v for k, v in self.buckets.items() if k not in _ACCEPTED and v}
         if not losses:
             return ("", 0)
         return max(losses.items(), key=lambda kv: kv[1])
@@ -69,11 +84,20 @@ def build(store, settings, search_stats: dict | None = None) -> Bottleneck:
     stats = search_stats or {}
     total = store.scalar("SELECT COUNT(*) FROM records") or 0
     processed = store.scalar("SELECT COUNT(*) FROM results") or 0
+    profiles = store.scalar(
+        "SELECT COUNT(*) FROM results WHERE decision='matched' AND linkedin_url<>''"
+    ) or 0
+    contact_only = store.scalar(
+        "SELECT COUNT(*) FROM results "
+        "WHERE decision='contact_route_only' AND route_count>0"
+    ) or 0
     return Bottleneck(
         target=settings.target_matches or 0,
-        accepted=store.scalar(
-            "SELECT COUNT(*) FROM results WHERE decision='matched' AND linkedin_url<>''"
-        ) or 0,
+        accepted=profiles + contact_only,
+        profiles=profiles,
+        contact_only=contact_only,
+        rows_with_routes=store.rows_with_routes(),
+        route_types=store.route_type_counts(),
         total_rows=total,
         processed=processed,
         unprocessed=max(0, total - processed),
@@ -84,13 +108,21 @@ def build(store, settings, search_stats: dict | None = None) -> Bottleneck:
         companies_with_footprint=store.scalar(
             "SELECT COUNT(*) FROM company_cache WHERE has_linkedin_footprint=1"
         ) or 0,
+        companies_with_routes=store.scalar(
+            "SELECT COUNT(*) FROM company_contacts WHERE discovered=1"
+        ) or 0,
     )
 
 
 def render(b: Bottleneck) -> str:
     lines = [BAR]
     if b.target_met:
-        lines += [f"  TARGET MET — {b.accepted:,} accepted (target {b.target:,})", BAR]
+        lines += [
+            f"  TARGET MET — {b.accepted:,} accepted (target {b.target:,})",
+            f"    {b.profiles:,} with a confirmed LinkedIn profile, "
+            f"{b.contact_only:,} on published contact routes",
+            BAR,
+        ]
         return "\n".join(lines)
 
     lines += [
@@ -126,10 +158,19 @@ def render(b: Bottleneck) -> str:
     lines.append(f"    Companies searched          : {b.companies_searched:>9,}")
     lines.append(f"    ...with a LinkedIn presence : {b.companies_with_footprint:>9,}"
                  f"  ({b.companies_with_footprint / max(b.companies_searched, 1):.1%})")
+    lines.append(f"    ...publishing a contact     : {b.companies_with_routes:>9,}")
+    lines.append(f"    Rows with a contact route   : {b.rows_with_routes:>9,}"
+                 f"  ({b.rows_with_routes / denominator:.1%} of processed)")
     lines.append(f"    Queries issued              : {b.queries_issued:>9,}")
     if b.inconclusive:
         lines.append(f"    Inconclusive searches       : {b.inconclusive:>9,}")
     lines.append("")
+
+    if b.route_types:
+        lines.append("  CONTACT ROUTES BY TYPE")
+        for route_type, count in sorted(b.route_types.items(), key=lambda kv: -kv[1]):
+            lines.append(f"    {route_type:<52} {count:>9,}")
+        lines.append("")
 
     lines += ["  WHY 1,000 WAS NOT REACHED"] if b.target >= 1000 else ["  WHY THE TARGET WAS NOT REACHED"]
     lines += _diagnose(b)
@@ -175,6 +216,12 @@ def _diagnose(b: Bottleneck) -> list[str]:
             "    those rows produced no candidate to score. Only a data source that\n"
             "    covers small private companies would move this number."
         )
+        if b.companies_with_routes:
+            out.append(
+                f"    Note: {b.companies_with_routes:,} of those companies DO publish a\n"
+                "    contact route. Those rows are deliverable as company-level leads\n"
+                "    even though the individual could not be identified."
+            )
     elif name == "blank_low_confidence":
         out.append(
             "    The dominant loss is rows that DID produce candidates but fell\n"

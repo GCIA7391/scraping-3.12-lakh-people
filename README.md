@@ -1,7 +1,8 @@
 # LinkedIn Enrichment Pipeline
 
-Attaches the most likely **public** LinkedIn profile URL to each person in a
-prospect workbook, at a configurable confidence threshold (default 95%).
+Finds a **reachable professional route** for each person in a prospect workbook:
+the most likely public LinkedIn profile where one can be confirmed, and the
+organisation's published contact routes where it cannot.
 
 Built for a specific dataset: 312,160 company directors in Bangalore and
 Hyderabad, exported from PrivateCircle's scrape of the Indian MCA/ROC registry.
@@ -11,12 +12,24 @@ The design decisions below follow from what that data actually contains.
 required confidence is left blank and told why. Near-misses go to a separate
 review file, never into the LinkedIn column.
 
+**Two outputs, scored independently**, because they are different claims:
+
+| | `LinkedIn Profile` | `Contact Routes` |
+|---|---|---|
+| What it asserts | *this profile is this human* | *this organisation publishes this way in* |
+| Gated on | confidence ≥ threshold **and** corroboration | nothing — it is a checkable fact |
+| Wrong answer costs | a call to the wrong person | a call to a switchboard |
+
+That split is what raises yield. A row succeeds when **either** holds, and the
+company is discoverable far more often than the individual is.
+
 ---
 
 ## Table of contents
 
 - [What the data supports](#what-the-data-supports)
 - [How matching works](#how-matching-works)
+- [Contact routes](#contact-routes)
 - [The query ladder](#the-query-ladder)
 - [Installation](#installation)
 - [Configuration](#configuration)
@@ -116,6 +129,55 @@ to 0.77. A consonant-skeleton check then separates genuine romanisation variants
 consonants differ). Finally, a weakest-link cap prevents an identical common
 surname (Kumar, Reddy, Singh) from masking a mismatched given name.
 
+## Contact routes
+
+A sales team does not need a LinkedIn URL. It needs a way to reach the person.
+Requiring the first to deliver the second was this pipeline's own ceiling: in a
+measured run **37.5% of companies** had a discoverable presence while only
+**12.5% of people** converted.
+
+So the company is searched once, its published contact routes are cached, and
+every executive there inherits them. With 306,916 people across **139,548
+companies** the cost is amortised 2.2 ways on average — and far more at the large
+employers, which are exactly the rows a wealth-management team most wants.
+
+Routes are emitted most-direct-first:
+
+```
+direct_corporate_email -> executive_office -> investor_relations -> board_office
+-> assistant -> reception -> linkedin_profile -> linkedin_company
+-> official_social -> contact_form -> conference_page
+```
+
+Every route carries the URL that published it, so any entry can be checked in one
+click.
+
+### What is deliberately *not* collected
+
+The scope is published professional contact routes. The pipeline will not emit:
+
+| Refused | Why |
+|---|---|
+| Personal email addresses | A free-provider address whose local part is the person's own name is a private mailbox |
+| Mobile numbers | An Indian 10-digit 6/7/8/9-series number is a personal handset more often than a switchboard, and a snippet cannot tell which. Refused as a class |
+| Bare 10-digit numbers, `+91` + 10 digits | Indistinguishable from a mobile. A switchboard is written with its area code split off — `080-4123 4567` — and that formatting is the only reliable tell |
+| Anything constructed | There is no address-pattern inference. Every route is a substring of text a source actually published |
+| Contact-scraper sites | RocketReach, ZoomInfo and friends restate LinkedIn and are frequently stale |
+
+Two further rules keep a route from being about the wrong person:
+
+* **A LinkedIn profile URL in a result set is never a route.** It is a candidate
+  identity, not an established one. The runner adds a profile route only for a
+  match that cleared the confidence and corroboration gates. (Caught in a live
+  pilot: route collection was emitting every `/in/` URL it saw, so one row picked
+  up 26 "contact routes" that were other people's profiles.)
+* **A person-scoped route requires the person to be named on the page** — the
+  same test corroboration uses. A conference programme listing a colleague is not
+  a way to reach this director.
+
+Company-scoped routes reach the *office*, and are correct as leads even after the
+individual moves on.
+
 ## The query ladder
 
 Naive matching costs 2–3 queries per person: 600k–900k queries for this file. The
@@ -125,13 +187,36 @@ ladder cuts that by ~65% (measured, see `dry-run` output below):
 Tier 1   one roster query per COMPANY        139,548 queries, shared by everyone there
 Tier 1b  negative cache — a company with no LinkedIn footprint disqualifies
          all of its people, at zero further cost
-Tier 2   per-person query, only when the company HAS a footprint but the
-         subject was absent from the roster
+Tier 2   per-person source ladder, up to 20 rungs, exhausted before "no match"
+Tier 3   company contact discovery — up to 3 queries per COMPANY, cached and
+         shared by every executive there
 ```
 
 Tier 1b is a logical consequence of reject rule 1, not a heuristic: if a match
 *requires* company evidence and the company has no discoverable presence, no
-person there can qualify.
+person there can qualify. It stops the *person* ladder only — Tier 3 still runs,
+because a company with no LinkedIn page may still publish an IR address.
+
+The footprint flag is **tri-state**. An inconclusive roster lookup records
+"unknown", not "no presence"; unknown runs the ladder anyway. Only a conclusive
+absence short-circuits.
+
+### The person ladder, in order
+
+```
+linkedin_scoped   linkedin_named   open_web   location
+leadership_page   board_page   executive   annual_report   investor_relations
+press_release   conference_speaker
+economic_times   business_standard   moneycontrol   bloomberg   crunchbase
+mca_din   exchanges
+contact   socials
+```
+
+Ordering is the only budget control: the runner works down the list and stops the
+moment a profile is confirmed, so the expensive tail is paid only for rows that
+would otherwise have been abandoned — which is exactly when it is worth paying.
+Each rung is named, and `variant_hits` in the QC report shows which ones earn
+their cost.
 
 Measured on the real file:
 
@@ -139,12 +224,36 @@ Measured on the real file:
 Total rows read              :      312,160
 Searchable rows              :      306,916
 Skipped before searching     :        5,244
-Unique companies             :      139,548
+Unique companies             :      139,548   (2.20 people per company)
 Tier 1 (one per company)     :      139,548  exact
 Tier 2 @ 25% footprint       :       76,729  -> total 216,277
 Naive baseline (2/person)    :      613,832
 Saving at 25% footprint      :        64.8%
 ```
+
+### What the deep ladder costs at full scale
+
+The deep ladder is not free, and the numbers deserve to be stated rather than
+discovered halfway through a run. Working the **whole file** at 37.5% footprint:
+
+| Contact queries/company | Ladder depth | Total queries | At 1 q/s |
+|---|---|---|---|
+| 0 | 8 | 1,060,296 | 12.3 days |
+| 0 | 20 | 2,441,418 | 28.3 days |
+| 3 | 8 | 1,478,940 | 17.1 days |
+| 3 | 20 | 2,860,062 | 33.1 days |
+
+**This is why you use `--target`, not the whole file.** A run that stops at 3,000
+deliverables works only as many rows as it needs:
+
+| Conversion | Rows worked | Queries (depth 8, 3 contact) | At 1 q/s |
+|---|---|---|---|
+| 20% | 15,000 | ~72,000 | 20 hours |
+| 5% | 60,000 | ~288,000 | 3.3 days |
+| 2% | 150,000 | ~722,000 | 8.4 days |
+
+The conversion rate is not knowable without searching. `run --pilot 1000` measures
+it, then projects; see [Pilot first](#pilot-first).
 
 ## Installation
 
@@ -267,24 +376,51 @@ Key settings:
 | `enable_negative_cache` | true | Skip everyone at footprint-less companies |
 | `llm.enabled` | false | Optional adjudication of borderline candidates |
 
-## Yield mode — ~1,000 usable HNI prospects
+## Yield mode — usable HNI prospects
 
 The default for prospect generation. Optimises for leads a sales team can act on
 rather than for a statistical proof.
 
 ```bash
 python main.py preflight
-python main.py run --input data/*.csv --yield --target 1000
+python main.py run --input data/*.csv --yield --pilot 1000 --no-rank   # measure
+python main.py run --input data/*.csv --yield --target 3000 --no-rank  # then run
 ```
 
 | | |
 |---|---|
-| Threshold | **0.95** with corroboration (not 0.99) |
+| Threshold | **0.95** with corroboration (not 0.99) — for the profile claim only |
 | Pool | **the whole file** — every executive shape, including plain "Director" |
 | Company size | **never a rejection**; corroboration settles it instead |
 | Corroboration | **one strong public source is enough** |
-| Query ladder | **8+ formulations per person**, all tried before "no match" |
-| Stop | at `--target` matches, or genuine database exhaustion |
+| Query ladder | **up to 20 formulations per person**, all tried before "no match" |
+| Delivery | a confirmed profile **or** ≥1 published contact route |
+| Stop | at `--target` deliverables, or genuine database exhaustion |
+
+### Pilot first
+
+```bash
+python main.py run --input data/*.csv --yield --pilot 1000 --no-rank
+```
+
+A pilot works N rows and ends in a **measurement**, not a deliverable — no
+prospect file is written, because presenting a 1,000-row sample's output as the
+product is the confusion the pilot exists to prevent. It reports profiles
+confirmed, rows with ≥1 route, routes per row, the route-type mix, rows/sec,
+queries/row, and the projection to the full file.
+
+It also refuses to flatter itself:
+
+* if >20% of rows failed at the search layer it says so, and says the pilot is
+  measuring the backend rather than the data;
+* a **ranked** pilot is labelled an upper bound, because it worked the most
+  promising rows first;
+* an unranked pilot (`--no-rank`) is labelled a fair sample;
+* a projected shortfall against `--target` is stated as a shortfall.
+
+`--no-rank` is usually right at this scale. Ranking earns its cost when a run
+stops early at a target; when the whole file is going to be worked anyway it is
+an extra pass for nothing — and it makes the pilot unrepresentative.
 
 ### Why the pool is the whole file
 
@@ -512,7 +648,7 @@ python main.py suppress --row-uid <uid> --note "deletion request"
 ### Output
 
 For each input file, `out/<name>_enriched.csv` — the original columns
-**byte-for-byte unchanged**, with four appended:
+**byte-for-byte unchanged**, with the four specified columns appended first:
 
 | Column | Contents |
 |---|---|
@@ -521,8 +657,24 @@ For each input file, `out/<name>_enriched.csv` — the original columns
 | `Verification Notes` | Why it matched, or why it did not |
 | `Source URL(s)` | Search results the decision was based on |
 
-Plus `out/review_queue.csv` (near-misses for human review) and a timestamped QC
-report in both JSON and text.
+then the contact-route columns, so a consumer reading only the specified four is
+unaffected by their existence:
+
+| Column | Contents |
+|---|---|
+| `Contact Routes` | One route per line, most direct first: `type: value (source)` |
+| `Best Contact Type` | The most direct route type on the row |
+| `Contact Source URL(s)` | Deduped sources for the routes |
+
+Plus:
+
+* `out/prospects.csv` — **the deliverable a sales team works.** Every row with a
+  way in, profiles first, then rows carried by their contact routes.
+* `out/top_matches.csv` — confirmed identities only. Written as
+  `partial_matches.csv` instead when the target was not met, so a short list is
+  never presented under the deliverable's name.
+* `out/review_queue.csv` — near-misses for human review.
+* a timestamped QC report in both JSON and text.
 
 `Confidence Score` is deliberately *empty* rather than `0.0` on unmatched rows —
 a numeric zero invites a downstream reader to think the row was scored and
@@ -539,23 +691,27 @@ linkedin_enrichment/
   providers/   base.py           SearchProvider ABC -> SerpResult
                http_providers.py searxng, duckduckgo, google_cse, serper, serpapi
                cassette.py       offline replay — the whole suite runs with no network
-  search/      query_builder.py  the Tier 1 / 1b / 2 ladder
+  search/      query_builder.py  the person ladder + the company contact ladder
                ratelimit.py      adaptive token bucket
                retry.py          exponential backoff with full jitter
                client.py         cache -> limit -> retry -> provider
   identity/    scorer.py         features, scoring, the final decision
                reject.py         the hard gates
+               corroborate.py    the independent second source
+               company_contact.py company contact discovery, cached per company
                calibrate.py      isotonic fit of raw score -> probability
                llm_adjudicator.py optional, off by default
   cache/       company_cache.py  rosters + the negative cache
                serp_cache.py     raw responses, so re-scoring is free
   database/    schema.py, store.py — SQLite WAL, claim/resume protocol
   workers/     pool.py    async pool, bounded queue, graceful drain
-               runner.py  per-row ladder execution
+               runner.py  per-row execution: company stage, ladder, routes, decide
   logging/     setup.py   JSON to file, text to console
                dashboard.py live rich panel
-  output/      writer.py, review_queue.py, report.py
-  tests/       119 tests, all offline
+  output/      contacts.py   the route model, hierarchy and scope guardrails
+               writer.py, top_matches.py, review_queue.py, report.py
+               bottleneck.py why a target was missed; pilot.py measure + project
+  tests/       426 tests, all offline
 main.py        CLI
 ```
 
@@ -570,6 +726,8 @@ resume across a run that may span days.
 | `results` | The decision per row |
 | `review_candidates` | Sub-threshold candidates — never promoted to a match |
 | `company_cache` | Brand, roster, and the footprint flag (the negative cache) |
+| `company_contacts` | Published contact routes per company — discovered once, reused |
+| `contact_routes` | Per-row routes, unique on `(row, type, value)` so retries cannot duplicate |
 | `serp_cache` | Raw provider responses, so re-scoring never re-pays for search |
 | `suppressions` | Tombstones for deletion requests |
 | `run_stats` | Per-run counters for the QC report |
@@ -706,6 +864,14 @@ the point estimate — 10/10 correct is not evidence of 95% precision.
   later re-run cannot resurrect it.
 * No credentialed access, no block circumvention, no CAPTCHA solving.
 * Conservative default rate limits.
+* **Contact routes stay on the professional side of the line.** Only routes an
+  organisation has published: official company addresses, executive-office and
+  IR desks, board offices, leadership and contact pages, official profiles, and
+  conference/speaker pages. No personal email addresses, no mobile numbers, no
+  pattern-guessed individual addresses, nothing behind authentication — see
+  [what is deliberately not collected](#what-is-deliberately-not-collected).
+  Every route carries its source URL so the claim can be checked and, if a data
+  subject objects, traced.
 
 ## Troubleshooting
 
@@ -752,10 +918,23 @@ So for roughly nine rows in ten the company is a small family entity with
 essentially no web footprint, and for nearly half the file the name alone is
 ambiguous within the dataset itself.
 
-**A realistic auto-accept yield is therefore 2–6% of rows (~6,000–19,000
-matches), with a point estimate near 3%.** A further 5–15% should land in the
-review queue. These numbers are reasoned estimates, not measurements — no live
-search has been run against this dataset.
+**A realistic auto-accept yield for the LinkedIn Profile column is therefore 2–6%
+of rows (~6,000–19,000 matches), with a point estimate near 3%.** A further 5–15%
+should land in the review queue. These numbers are reasoned estimates, not
+measurements — no live search has been run against this dataset.
+
+**Contact routes are the reason the deliverable is not capped at that number.**
+The ceiling for a profile is set by whether *the person* is findable; the ceiling
+for a route is set by whether *the company* is. In the one measured sample those
+were 12.5% and 37.5% respectively. A row at a company that publishes a leadership
+page and an IR address is a usable lead even when the individual is invisible —
+which is most of this file. That is why `--target 3000` is reachable when
+`3,000 confirmed profiles` would not have been.
+
+The honest form of that claim: the profile rate is estimated at 2–6%, the route
+rate is unmeasured at scale, and `run --pilot 1000` exists to replace both with
+numbers. Until a pilot runs against a working search backend, every figure in
+this section is a projection and is labelled as one.
 
 > **If your first live run reports 15–25% matched, treat that as an alarm, not a
 > win.** At this data quality it almost certainly means a reject rule has been

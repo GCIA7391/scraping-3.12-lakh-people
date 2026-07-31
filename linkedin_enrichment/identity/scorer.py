@@ -44,11 +44,22 @@ from .reject import (
 
 class Decision(str, Enum):
     MATCHED = "matched"
+    #: No LinkedIn profile cleared the identity gate, but the row carries at
+    #: least one published professional contact route. Delivered, because a
+    #: sales team can act on it — and kept distinct from MATCHED because the
+    #: two are different claims: one identifies a person, the other says how to
+    #: reach an executive at a company.
+    CONTACT_ROUTE_ONLY = "contact_route_only"
     BLANK_LOW_CONFIDENCE = "blank_low_confidence"
     BLANK_AMBIGUOUS = "blank_ambiguous"
     BLANK_NO_CANDIDATE = "blank_no_candidate"
     BLANK_SKIPPED = "blank_skipped"
     BLANK_ERROR = "blank_error"
+
+
+#: Decisions that count towards the target. Both are deliverables; only the
+#: first asserts an identity.
+DELIVERED = frozenset({Decision.MATCHED, Decision.CONTACT_ROUTE_ONLY})
 
 
 @dataclass(frozen=True)
@@ -127,7 +138,13 @@ class MatchResult:
 
     @property
     def matched(self) -> bool:
+        """True only for an accepted *identity* claim — a LinkedIn profile."""
         return self.decision is Decision.MATCHED
+
+    @property
+    def delivered(self) -> bool:
+        """True when the row is usable: a profile, or a contact route."""
+        return self.decision in DELIVERED
 
 
 # ---------------------------------------------------------------------------

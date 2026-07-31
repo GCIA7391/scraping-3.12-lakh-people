@@ -66,6 +66,19 @@ class Store:
                 self._conn.execute(ddl)
                 logger.info("migrated: added records.%s", column)
 
+        existing = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(results)")
+        }
+        for column, ddl in (
+            ("route_count",
+             "ALTER TABLE results ADD COLUMN route_count INTEGER NOT NULL DEFAULT 0"),
+            ("best_route_type",
+             "ALTER TABLE results ADD COLUMN best_route_type TEXT NOT NULL DEFAULT ''"),
+        ):
+            if column not in existing:
+                self._conn.execute(ddl)
+                logger.info("migrated: added results.%s", column)
+
     # ------------------------------------------------------------------
     # Plumbing
     # ------------------------------------------------------------------
@@ -262,14 +275,17 @@ class Store:
                 """
                 INSERT INTO results (
                     row_uid, linkedin_url, confidence, notes, source_urls, decision,
-                    top_score, runner_up_score, margin, provider, queries_used, resolved_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                    top_score, runner_up_score, margin, provider, queries_used,
+                    route_count, best_route_type, resolved_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(row_uid) DO UPDATE SET
                     linkedin_url=excluded.linkedin_url, confidence=excluded.confidence,
                     notes=excluded.notes, source_urls=excluded.source_urls,
                     decision=excluded.decision, top_score=excluded.top_score,
                     runner_up_score=excluded.runner_up_score, margin=excluded.margin,
                     provider=excluded.provider, queries_used=excluded.queries_used,
+                    route_count=excluded.route_count,
+                    best_route_type=excluded.best_route_type,
                     resolved_at=excluded.resolved_at
                 """,
                 (
@@ -278,7 +294,9 @@ class Store:
                     fields.get("notes", ""), fields.get("source_urls", ""),
                     fields.get("decision", ""), float(fields.get("top_score", 0.0)),
                     float(fields.get("runner_up_score", 0.0)), float(fields.get("margin", 0.0)),
-                    fields.get("provider", ""), int(fields.get("queries_used", 0)), now,
+                    fields.get("provider", ""), int(fields.get("queries_used", 0)),
+                    int(fields.get("route_count", 0)), fields.get("best_route_type", ""),
+                    now,
                 ),
             )
             conn.execute(
@@ -551,6 +569,111 @@ class Store:
             )
 
     # ------------------------------------------------------------------
+    # Company contact routes (discovered once, reused by every executive)
+    # ------------------------------------------------------------------
+    def get_company_contacts(self, company_key: str) -> sqlite3.Row | None:
+        with self._lock:
+            return self._conn.execute(
+                "SELECT * FROM company_contacts WHERE company_key = ?", (company_key,)
+            ).fetchone()
+
+    def put_company_contacts(
+        self, company_key: str, *, brand_name: str = "", website: str = "",
+        routes: Any = None, discovered: bool | None = None, queries: int = 1,
+    ) -> None:
+        """Cache one company's published contact routes.
+
+        ``discovered=None`` means the lookup was inconclusive. It is stored as
+        SQL NULL so the next pass retries rather than treating a broken search as
+        proof that the company publishes nothing — the same rule that governs
+        ``company_cache.has_linkedin_footprint``.
+        """
+        with self._tx() as conn:
+            conn.execute(
+                """
+                INSERT INTO company_contacts (
+                    company_key, brand_name, website, routes_json, discovered,
+                    queried_at, query_count
+                ) VALUES (?,?,?,?,?,?,?)
+                ON CONFLICT(company_key) DO UPDATE SET
+                    brand_name=excluded.brand_name,
+                    website=excluded.website,
+                    routes_json=excluded.routes_json,
+                    discovered=excluded.discovered,
+                    queried_at=excluded.queried_at,
+                    query_count=company_contacts.query_count + excluded.query_count
+                """,
+                (
+                    company_key, brand_name, website, json.dumps(routes or []),
+                    None if discovered is None else int(discovered),
+                    time.time(), queries,
+                ),
+            )
+
+    def add_contact_routes(self, row_uid: str, routes: Iterable[dict[str, Any]]) -> int:
+        """Attach contact routes to a row. Idempotent — re-running adds nothing.
+
+        ``INSERT OR IGNORE`` against the ``(row_uid, route_type, value)`` unique
+        index, so a retried row cannot accumulate duplicate copies of the same
+        published address.
+        """
+        now = time.time()
+        payload = [
+            (row_uid, r["type"], r["value"], r.get("source_url", ""),
+             r.get("label", ""), r.get("scope", "company"), int(r.get("rank", 0)), now)
+            for r in routes
+        ]
+        if not payload:
+            return 0
+        with self._tx() as conn:
+            cursor = conn.executemany(
+                """INSERT OR IGNORE INTO contact_routes
+                   (row_uid, route_type, value, source_url, label, scope, rank, created_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                payload,
+            )
+            return cursor.rowcount
+
+    def routes_for_row(self, row_uid: str) -> list[sqlite3.Row]:
+        with self._lock:
+            return list(self._conn.execute(
+                "SELECT * FROM contact_routes WHERE row_uid = ? ORDER BY rank, id",
+                (row_uid,),
+            ))
+
+    def routes_by_row(self, source_file: str = "") -> dict[str, list[sqlite3.Row]]:
+        """Every row's routes, indexed for the writer's single pass over a file."""
+        sql = (
+            "SELECT cr.* FROM contact_routes cr "
+            "JOIN records r ON r.row_uid = cr.row_uid "
+        )
+        params: tuple[Any, ...] = ()
+        if source_file:
+            sql += "WHERE r.source_file = ? "
+            params = (source_file,)
+        sql += "ORDER BY cr.rank, cr.id"
+
+        index: dict[str, list[sqlite3.Row]] = {}
+        with self._lock:
+            for row in self._conn.execute(sql, params):
+                index.setdefault(row["row_uid"], []).append(row)
+        return index
+
+    def route_type_counts(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                row["route_type"]: row["n"] for row in self._conn.execute(
+                    "SELECT route_type, COUNT(*) AS n FROM contact_routes "
+                    "GROUP BY route_type ORDER BY n DESC"
+                )
+            }
+
+    def rows_with_routes(self) -> int:
+        return int(self.scalar(
+            "SELECT COUNT(DISTINCT row_uid) FROM contact_routes"
+        ) or 0)
+
+    # ------------------------------------------------------------------
     # SERP cache
     # ------------------------------------------------------------------
     def get_serp(self, query_hash: str, ttl_seconds: float | None = None) -> Any | None:
@@ -665,6 +788,43 @@ class Store:
                 """,
                 (limit,),
             ).fetchall()
+
+    def delivered_prospects(self, limit: int = 3000) -> list[sqlite3.Row]:
+        """Every row a sales team can act on, best first.
+
+        Wider than ``top_matches``: a row with a published executive-office
+        address but no confirmed LinkedIn profile is a usable lead, and excluding
+        it was the single largest self-inflicted loss in earlier runs.
+
+        Ordering: confirmed profiles first (the strongest deliverable), then by
+        how direct the best contact route is, then by offline priority.
+        """
+        with self._lock:
+            return self._conn.execute(
+                """
+                SELECT r.row_uid, r.name, r.company, r.designation, r.location,
+                       r.priority,
+                       res.linkedin_url, res.confidence, res.notes, res.source_urls,
+                       res.decision, res.route_count, res.best_route_type
+                FROM results res
+                JOIN records r ON r.row_uid = res.row_uid
+                WHERE (res.decision = 'matched' AND res.linkedin_url <> '')
+                   OR (res.decision = 'contact_route_only' AND res.route_count > 0)
+                ORDER BY (res.linkedin_url <> '') DESC,
+                         res.confidence DESC,
+                         r.priority DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+
+    def delivered_count(self) -> int:
+        """Rows carrying a profile or at least one contact route."""
+        return int(self.scalar(
+            "SELECT COUNT(*) FROM results "
+            "WHERE (decision = 'matched' AND linkedin_url <> '') "
+            "   OR (decision = 'contact_route_only' AND route_count > 0)"
+        ) or 0)
 
     def iter_review_queue(self) -> Iterator[sqlite3.Row]:
         with self._lock:

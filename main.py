@@ -30,6 +30,7 @@ from linkedin_enrichment.cache.company_cache import CompanyCache
 from linkedin_enrichment.cache.serp_cache import SerpCache
 from linkedin_enrichment.config.settings import Settings
 from linkedin_enrichment.database.store import Store
+from linkedin_enrichment.identity.company_contact import CompanyContactFinder
 from linkedin_enrichment.identity.scorer import Decision
 from linkedin_enrichment.identity import priority
 from linkedin_enrichment.ingest import prefilter
@@ -38,6 +39,7 @@ from linkedin_enrichment.logging import dashboard as dash
 from linkedin_enrichment.logging import setup as log_setup
 from linkedin_enrichment.output import bottleneck as bottleneck_mod
 from linkedin_enrichment.output import explain as explain_mod
+from linkedin_enrichment.output import pilot as pilot_mod
 from linkedin_enrichment.output import report as report_mod
 from linkedin_enrichment.output import review_queue, top_matches, writer
 from linkedin_enrichment.output import validate as validate_mod
@@ -130,7 +132,10 @@ async def enrich(
     serp_cache = SerpCache(store, settings.serp_cache_ttl_days)
     company_cache = CompanyCache(store)
     client = SearchClient(provider, serp_cache, settings)
-    runner = LadderRunner(client, company_cache, settings)
+    contact_finder = (
+        CompanyContactFinder(store, settings) if settings.enable_contact_routes else None
+    )
+    runner = LadderRunner(client, company_cache, settings, contact_finder)
 
     pending = store.scalar("SELECT COUNT(*) FROM records WHERE status = 'pending'") or 0
     total = min(pending, limit) if limit else pending
@@ -200,6 +205,11 @@ def cmd_run(args, settings: Settings) -> int:
     limit = getattr(args, "limit", None)
     explain = bool(getattr(args, "explain", False))
     force = bool(getattr(args, "force", False))
+    # A pilot is a limited run that ends in a measurement rather than a
+    # deliverable. It caps the row count the same way --limit does.
+    pilot_rows = getattr(args, "pilot", None)
+    if pilot_rows:
+        limit = pilot_rows if limit is None else min(limit, pilot_rows)
 
     # Gate: a run that cannot search produces blanks that look like findings.
     # Skipped for the cassette provider, which is offline by design.
@@ -227,16 +237,15 @@ def cmd_run(args, settings: Settings) -> int:
             print("no input files given and the database is empty; nothing to do", file=sys.stderr)
             return 2
 
-        # Precision mode claims by priority and filters to the preferred-role
-        # pool, both of which live in columns that only `rank` populates. Without
-        # this, a fresh database would match nothing at all and look like a
-        # finding rather than a missing step.
-        if settings.precision_mode or settings.yield_mode:
+        # Ranked claiming and the preferred-role pool both live in columns that
+        # only `rank` populates. Without this, a fresh database would match
+        # nothing at all and look like a finding rather than a missing step.
+        if settings.rank_claim_order or settings.preferred_roles_only:
             ranked_already = store.scalar(
                 "SELECT COUNT(*) FROM records WHERE priority > 0"
             ) or 0
             if not ranked_already:
-                logger.info("precision mode: ranking records first")
+                logger.info("ranked claiming requested: scoring priorities first")
                 counts = rank_records(store)
                 print(
                     f"ranked {counts['ranked']:,} rows "
@@ -249,7 +258,9 @@ def cmd_run(args, settings: Settings) -> int:
         # is what makes a run over a flaky free provider self-healing.
         store.requeue_deferred(settings.max_row_attempts)
 
-        asyncio.run(enrich(store, settings, run_id, limit=limit, explain=explain))
+        progress = asyncio.run(
+            enrich(store, settings, run_id, limit=limit, explain=explain)
+        )
 
         # Rows still deferred at the end need an output line that explains why,
         # rather than appearing as a bare "not processed".
@@ -258,27 +269,37 @@ def cmd_run(args, settings: Settings) -> int:
         stats = store.get_stats(run_id)
         stats_for_bottleneck = {k: _num(v) for k, v in stats.items()}
 
+        if pilot_rows:
+            # A pilot ends in a measurement. No deliverable is written from it:
+            # presenting a 1,000-row sample's output as the product is exactly
+            # the confusion the pilot exists to prevent.
+            print(pilot_mod.render(pilot_mod.build(
+                progress, store, settings,
+                queries=int(stats_for_bottleneck.get("queries_issued", 0) or 0),
+            )))
+            return 0
+
         outputs = writer.write_all(store, settings.output_dir)
         review_path = review_queue.write_review_queue(store, settings.output_dir)
         # The ranked deliverable belongs to precision/yield mode. Emitting it from
         # a coverage run would present a "top matches" file that is not the
         # deliverable it looks like.
         top_path, top_n = (None, 0)
+        prospect_path, prospect_n = (None, 0)
         if settings.precision_mode or settings.yield_mode:
             bn = bottleneck_mod.build(store, settings, stats_for_bottleneck)
-            if bn.target_met:
-                top_path, top_n = top_matches.write_top_matches(
+            filename = "top_matches.csv" if bn.target_met else "partial_matches.csv"
+            # The final CSV is gated on the target. Shipping a short list under
+            # the deliverable's name hides the shortfall; the diagnosis below is
+            # the useful output instead.
+            top_path, top_n = top_matches.write_top_matches(
+                store, settings.output_dir,
+                limit=settings.target_matches or 1000, filename=filename,
+            )
+            if settings.enable_contact_routes:
+                prospect_path, prospect_n = top_matches.write_prospects(
                     store, settings.output_dir,
-                    limit=settings.target_matches or 1000,
-                )
-            else:
-                # The final CSV is gated on the target. Shipping a short list as
-                # if it were the deliverable hides the shortfall; the diagnosis
-                # below is the useful output instead.
-                top_path, top_n = top_matches.write_top_matches(
-                    store, settings.output_dir,
-                    limit=settings.target_matches or 1000,
-                    filename="partial_matches.csv",
+                    limit=settings.target_matches or 3000,
                 )
             print(bottleneck_mod.render(bn))
 
@@ -295,6 +316,8 @@ def cmd_run(args, settings: Settings) -> int:
     print(f"review queue   : {review_path}")
     if top_path is not None:
         print(f"top matches    : {top_path}  ({top_n:,} rows)")
+    if prospect_path is not None:
+        print(f"prospects      : {prospect_path}  ({prospect_n:,} rows with a way in)")
     return 0
 
 
@@ -665,7 +688,18 @@ def build_parser() -> argparse.ArgumentParser:
                         help="yield mode: >=0.95 with corroboration, whole file, deep query "
                              "ladder, run until --target matches or the database is exhausted")
         sp.add_argument("--target", type=int, dest="target_matches",
-                        help="stop once this many matches are found (default 1000 in precision mode)")
+                        help="stop once this many deliverables are found "
+                             "(default 1000 in precision/yield mode)")
+        sp.add_argument("--pilot", type=int, metavar="N",
+                        help="work N rows, then report measured conversion and project "
+                             "the full file — do this before committing to 312,160 rows")
+        sp.add_argument("--no-rank", action="store_true", dest="no_rank",
+                        help="claim rows in file order; skip the offline priority pass. "
+                             "Ranking earns its cost only when the run stops at a target")
+        sp.add_argument("--no-contact-routes", action="store_true",
+                        dest="no_contact_routes",
+                        help="LinkedIn profiles only; do not collect published "
+                             "professional contact routes")
 
     p = sub.add_parser("ingest", help="load workbooks into the database")
     add_input(p)
@@ -758,6 +792,15 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
         return 2
+
+    # Negations are applied after the mode defaults, so `--precision --no-rank`
+    # means what it says. Passing them through `overrides` would let
+    # `_apply_precision_defaults` silently switch them back on.
+    if getattr(args, "no_rank", False):
+        settings.rank_claim_order = False
+    if getattr(args, "no_contact_routes", False):
+        settings.enable_contact_routes = False
+        settings.accept_on_contact_route = False
 
     log_setup.configure(
         settings.log_dir, settings.log_level,

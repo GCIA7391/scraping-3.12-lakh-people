@@ -95,6 +95,11 @@ CREATE TABLE IF NOT EXISTS results (
     margin          REAL NOT NULL DEFAULT 0.0,
     provider        TEXT NOT NULL DEFAULT '',
     queries_used    INTEGER NOT NULL DEFAULT 0,
+    -- How many professional contact routes this row carries, and the most
+    -- direct one. A row is *accepted* on either a profile or a route, so these
+    -- are read alongside `decision` rather than derived from it.
+    route_count     INTEGER NOT NULL DEFAULT 0,
+    best_route_type TEXT NOT NULL DEFAULT '',
     resolved_at     REAL
 );
 
@@ -130,6 +135,42 @@ CREATE TABLE IF NOT EXISTS company_cache (
     queried_at             REAL,
     query_count            INTEGER NOT NULL DEFAULT 0
 );
+
+-- Company-level contact routes, discovered ONCE per company and reused by every
+-- executive there. This is what lifts yield: 312,160 people belong to 140,351
+-- companies, and a company is discoverable far more often than an individual is,
+-- so a row that fails person-level search can still be delivered with a real,
+-- published way in.
+CREATE TABLE IF NOT EXISTS company_contacts (
+    company_key  TEXT PRIMARY KEY,
+    brand_name   TEXT NOT NULL DEFAULT '',
+    website      TEXT NOT NULL DEFAULT '',
+    routes_json  TEXT NOT NULL DEFAULT '[]',
+    -- 1 = searched, routes found; 0 = searched, nothing published;
+    -- NULL = the lookup was inconclusive, so it must be retried rather than
+    -- cached as an absence (same rule as has_linkedin_footprint).
+    discovered   INTEGER,
+    queried_at   REAL,
+    query_count  INTEGER NOT NULL DEFAULT 0
+);
+
+-- Per-row contact routes. One row per distinct (person, route type, value), so
+-- re-running cannot duplicate a route and every entry keeps its source URL.
+CREATE TABLE IF NOT EXISTS contact_routes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    row_uid    TEXT NOT NULL REFERENCES records(row_uid) ON DELETE CASCADE,
+    route_type TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    source_url TEXT NOT NULL DEFAULT '',
+    label      TEXT NOT NULL DEFAULT '',
+    scope      TEXT NOT NULL DEFAULT 'company',
+    rank       INTEGER NOT NULL DEFAULT 0,
+    created_at REAL,
+    UNIQUE(row_uid, route_type, value)
+);
+
+CREATE INDEX IF NOT EXISTS idx_contact_routes_row  ON contact_routes(row_uid);
+CREATE INDEX IF NOT EXISTS idx_contact_routes_type ON contact_routes(route_type);
 
 -- Raw provider responses, so re-scoring after a tuning change costs nothing.
 CREATE TABLE IF NOT EXISTS serp_cache (

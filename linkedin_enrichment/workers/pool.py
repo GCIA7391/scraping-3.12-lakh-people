@@ -32,7 +32,13 @@ class RunProgress:
 
     total: int = 0
     processed: int = 0
+    #: Rows with an accepted LinkedIn profile — an identity claim.
     matched: int = 0
+    #: Rows delivered on published contact routes alone, with no profile.
+    contact_only: int = 0
+    #: Rows carrying at least one contact route, profile or not.
+    with_routes: int = 0
+    routes_found: int = 0
     blank: int = 0
     errors: int = 0
     #: Transient failures parked for a later pass.
@@ -56,6 +62,11 @@ class RunProgress:
         return (self.confidence_sum / self.matched) if self.matched else 0.0
 
     @property
+    def delivered(self) -> int:
+        """What the target counts: rows a sales team can act on."""
+        return self.matched + self.contact_only
+
+    @property
     def eta_seconds(self) -> float:
         remaining = max(0, self.total - self.processed)
         rate = self.rate_per_second
@@ -68,8 +79,13 @@ class RunProgress:
         if outcome.match.matched:
             self.matched += 1
             self.confidence_sum += outcome.match.confidence
+        elif outcome.match.decision is Decision.CONTACT_ROUTE_ONLY:
+            self.contact_only += 1
         else:
             self.blank += 1
+        if outcome.routes:
+            self.with_routes += 1
+            self.routes_found += len(outcome.routes)
         if outcome.match.decision is Decision.BLANK_ERROR:
             self.errors += 1
 
@@ -136,18 +152,22 @@ class WorkerPool:
     async def _produce(self) -> None:
         """Claim batches and feed the queue until work runs out or we stop."""
         while not self._shutdown.is_set():
-            # Precision mode stops as soon as the target is met — the whole point
-            # is to stop early, not to work the pool.
+            # Stop as soon as the target is met. The target counts *deliverables*
+            # — rows a sales team can act on — not identity claims: a row with a
+            # published executive-office address is a lead whether or not a
+            # LinkedIn profile was ever confirmed for it.
             #
             # This is a stop signal, not a hard cap: a batch is already in flight
             # when the target is reached, so the final count can overshoot by up
-            # to one batch. That is harmless, because the deliverable is the
-            # top-N by confidence (see output/top_matches.py) and extra matches
-            # simply widen the pool it selects from.
+            # to one batch. That is harmless — the deliverable is the ranked
+            # top-N (see output/top_matches.py) and extra rows simply widen the
+            # pool it selects from.
             target = self.settings.target_matches
-            if target and self.progress.matched >= target:
+            if target and self.progress.delivered >= target:
                 logger.info(
-                    "target of %d matches reached; stopping intake", target
+                    "target of %d deliverables reached (%d profiles, %d contact-route "
+                    "only); stopping intake",
+                    target, self.progress.matched, self.progress.contact_only,
                 )
                 break
 
@@ -159,7 +179,7 @@ class WorkerPool:
             )
             batch = await asyncio.to_thread(
                 self.store.claim_batch, size,
-                ranked=self.settings.precision_mode,
+                ranked=self.settings.rank_claim_order,
                 preferred_only=self.settings.preferred_roles_only,
             )
             if not batch:
@@ -168,7 +188,7 @@ class WorkerPool:
                 target = self.settings.target_matches
                 if self._shutdown.is_set() or (
                     self.limit is not None and self._dispatched >= self.limit
-                ) or (target and self.progress.matched >= target):
+                ) or (target and self.progress.delivered >= target):
                     # Return the rest of this batch rather than holding claims.
                     unstarted = [
                         r["row_uid"] for r in batch
@@ -230,6 +250,15 @@ class WorkerPool:
         """
         match = outcome.match
 
+        # Routes are persisted before the decision branch: a row that is about to
+        # be deferred and retried still discovered real, published contact
+        # information, and throwing that away would make the retry pay for it
+        # again. The unique index makes the write idempotent.
+        if outcome.routes:
+            self.store.add_contact_routes(
+                outcome.row_uid, _route_payload(outcome.routes)
+            )
+
         if match.decision is Decision.BLANK_ERROR:
             deferred = self.store.defer_row(
                 outcome.row_uid,
@@ -255,6 +284,8 @@ class WorkerPool:
             margin=match.margin,
             provider=self.runner.client.provider.name,
             queries_used=outcome.queries_used,
+            route_count=len(outcome.routes),
+            best_route_type=outcome.best_route_type,
         )
 
         # Sub-threshold candidates go to a separate review file only. They are
@@ -272,3 +303,12 @@ class WorkerPool:
         ]
         if candidates:
             self.store.add_review_candidates(outcome.row_uid, candidates)
+
+
+def _route_payload(routes) -> list[dict]:
+    """Contact routes in the shape ``Store.add_contact_routes`` expects."""
+    return [
+        {"type": r.type.value, "value": r.value, "source_url": r.source_url,
+         "label": r.label, "scope": r.scope, "rank": r.rank}
+        for r in routes
+    ]

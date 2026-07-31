@@ -18,11 +18,16 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from ..ingest.reader import make_row_uid, read_file
+from . import contacts as contacts_mod
 
 logger = logging.getLogger(__name__)
 
 # Appended in this order. Names match the specification exactly.
 OUTPUT_COLUMNS = ("LinkedIn Profile", "Confidence Score", "Verification Notes", "Source URL(s)")
+
+# Then the contact-route columns. Appended after the original four so a consumer
+# reading only the specified columns is unaffected.
+CONTACT_COLUMNS = contacts_mod.CONTACT_COLUMNS
 
 # Flush to disk every N rows so a crash costs at most this many rows of output.
 FLUSH_EVERY = 2_000
@@ -79,16 +84,19 @@ def write_enriched_csv(
     destination = output_dir / f"{source.stem}{suffix}.csv"
 
     index = load_results(store, source_file)
+    routes_index = store.routes_by_row(source_file)
     written = 0
     matched = 0
+    with_routes = 0
 
     with destination.open("w", encoding="utf-8", newline="") as handle:
         writer: csv.DictWriter | None = None
+        columns = OUTPUT_COLUMNS + CONTACT_COLUMNS
 
         for row in read_file(source):
             if writer is None:
                 fieldnames = list(row.headers) + [
-                    c for c in OUTPUT_COLUMNS if c not in row.headers
+                    c for c in columns if c not in row.headers
                 ]
                 writer = csv.DictWriter(
                     handle, fieldnames=fieldnames, extrasaction="ignore"
@@ -100,11 +108,23 @@ def write_enriched_csv(
             if profile:
                 matched += 1
 
+            routes = contacts_mod.deserialise([
+                {"type": r["route_type"], "value": r["value"],
+                 "source_url": r["source_url"], "label": r["label"], "scope": r["scope"]}
+                for r in routes_index.get(uid, ())
+            ])
+            if routes:
+                with_routes += 1
+            best = contacts_mod.best_route(routes)
+
             record = dict(row.raw)
             record[OUTPUT_COLUMNS[0]] = profile
             record[OUTPUT_COLUMNS[1]] = confidence
             record[OUTPUT_COLUMNS[2]] = notes
             record[OUTPUT_COLUMNS[3]] = sources
+            record[CONTACT_COLUMNS[0]] = contacts_mod.render_routes(routes)
+            record[CONTACT_COLUMNS[1]] = best.type.value if best else ""
+            record[CONTACT_COLUMNS[2]] = contacts_mod.render_sources(routes)
             writer.writerow(record)
 
             written += 1
@@ -112,7 +132,8 @@ def write_enriched_csv(
                 handle.flush()
 
     logger.info(
-        "wrote %s rows (%s matched) to %s", f"{written:,}", f"{matched:,}", destination
+        "wrote %s rows (%s with a profile, %s with a contact route) to %s",
+        f"{written:,}", f"{matched:,}", f"{with_routes:,}", destination,
     )
     return destination
 

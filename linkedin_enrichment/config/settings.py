@@ -213,6 +213,10 @@ class Settings:
     target_matches: int = 0
     #: Only process rows whose designation is a preferred role.
     preferred_roles_only: bool = False
+    #: Claim rows highest-priority-first instead of in file order. Worth it when
+    #: the run stops at a target; near-pointless when the whole file is going to
+    #: be worked anyway, which is why ``--no-rank`` exists.
+    rank_claim_order: bool = False
     #: Require a second, independent source naming both person and company.
     #: Automatically on in precision mode: name+company alone scores 0.9644,
     #: which clears 95% but fails 99%.
@@ -234,6 +238,24 @@ class Settings:
     enable_person_tier: bool = True       # Tier 2: per-person query
     enable_negative_cache: bool = True    # Tier 1b: skip everyone at footprint-less companies
     serp_cache_ttl_days: int = 30
+
+    # --- contact routes ---
+    #: Discover each company's published contact routes once and share them with
+    #: every executive there. This is the yield lever: a company is discoverable
+    #: far more often than an individual is, and a published IR address is a
+    #: usable lead even when no personal profile is ever found.
+    enable_contact_routes: bool = True
+    #: Queries spent per *company* on contact discovery. Amortised across every
+    #: executive at that company, so the per-person cost is this / 2.2.
+    max_company_contact_queries: int = 3
+    #: Cap on routes cached per company, and emitted per row.
+    max_company_routes: int = 8
+    max_row_routes: int = 12
+    #: Count a row as delivered when it carries at least one professional route,
+    #: even if no LinkedIn profile cleared the identity gate. Published company
+    #: contact information is a checkable fact, not a probabilistic claim about
+    #: which human a profile belongs to, so it is not confidence-gated.
+    accept_on_contact_route: bool = True
 
     # --- nested ---
     weights: ScoringWeights = field(default_factory=ScoringWeights)
@@ -339,6 +361,11 @@ class Settings:
             self.target_matches = 1000
         self.max_person_queries = max(self.max_person_queries, 8)
         self.review_queue_floor = min(self.review_queue_floor, 0.70)
+        # A row is delivered on any professional route, not only on a LinkedIn
+        # URL. This is the change that moves the number: the company is
+        # discoverable roughly three times as often as the individual.
+        self.enable_contact_routes = True
+        self.accept_on_contact_route = True
 
     def _apply_precision_defaults(self) -> None:
         """Turn on everything precision mode implies, unless explicitly overridden.
@@ -351,6 +378,7 @@ class Settings:
             self.confidence_threshold = 0.99
         self.require_corroboration = True
         self.preferred_roles_only = True
+        self.rank_claim_order = True
         if not self.target_matches:
             self.target_matches = 1000
         # Near-misses are the point of the review queue here, so keep the floor

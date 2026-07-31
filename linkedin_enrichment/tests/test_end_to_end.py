@@ -54,14 +54,19 @@ class TestOutputIntegrity:
                 assert after[column] == value, f"column {column!r} was modified"
 
     def test_new_columns_are_appended_in_order(self, enriched) -> None:
+        """The four specified columns come first, in order, immediately after the
+        input's own. Contact-route columns follow, so a consumer reading only the
+        specified columns is unaffected by their existence."""
         _, output, source = enriched
         with source.open(encoding="utf-8-sig") as handle:
             original_headers = next(csv.reader(handle))
         with output.open(encoding="utf-8-sig") as handle:
             new_headers = next(csv.reader(handle))
 
+        appended = new_headers[len(original_headers):]
         assert new_headers[: len(original_headers)] == original_headers
-        assert new_headers[len(original_headers):] == list(writer.OUTPUT_COLUMNS)
+        assert appended[: len(writer.OUTPUT_COLUMNS)] == list(writer.OUTPUT_COLUMNS)
+        assert appended[len(writer.OUTPUT_COLUMNS):] == list(writer.CONTACT_COLUMNS)
 
     def test_unmatched_rows_have_no_url_and_carry_a_reason(self, enriched) -> None:
         _, output, _ = enriched
