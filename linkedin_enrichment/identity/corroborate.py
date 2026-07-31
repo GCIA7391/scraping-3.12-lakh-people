@@ -31,27 +31,53 @@ from ..ingest.normalize import (
 )
 from ..providers.base import SerpResult
 
-# Republications of the MCA registry. Agreeing with these is circular.
-AGGREGATOR_DOMAINS = frozenset({
-    "zaubacorp.com", "tofler.in", "indiamart.com", "thecompanycheck.com",
-    "instafinancials.com", "quickcompany.in", "mca.gov.in", "companycheck.co.in",
-    "falconebiz.com", "b2bhint.com", "startupindia.gov.in", "opencorporates.com",
-    "indiafilings.com", "cleartax.in", "corpwiz.in", "registrationwala.com",
-})
-
-# Contact-scraper sites: they restate LinkedIn rather than corroborate it.
+# Contact-scraper sites: they restate LinkedIn rather than corroborate it, and
+# their data is frequently stale. These remain excluded — they are the one source
+# class that adds no information at all.
 SCRAPER_DOMAINS = frozenset({
     "rocketreach.co", "zoominfo.com", "signalhire.com", "apollo.io",
     "lusha.com", "contactout.com", "leadiq.com", "aroundeal.com", "hunter.io",
 })
 
-# Editorially maintained or primary sources — these do carry independent weight.
-AUTHORITATIVE_DOMAINS = frozenset({
-    "crunchbase.com", "bloomberg.com", "reuters.com", "economictimes.indiatimes.com",
-    "business-standard.com", "livemint.com", "forbes.com", "inc42.com",
-    "yourstory.com", "entrackr.com", "moneycontrol.com", "thehindubusinessline.com",
-    "legal500.com", "chambers.com", "theorg.com", "tracxn.com",
+# Statutory and registry filings. These ARE accepted as corroboration: for an HNI
+# prospect list, an MCA/NSE/BSE filing naming the person against the company is
+# exactly the confirmation a sales team needs.
+#
+# Noted honestly: the input was itself derived from MCA data, so a registry hit
+# is weaker evidence than an independent one — it can confirm the directorship is
+# real but not that the LinkedIn profile is the same human. The source class is
+# recorded on every row so this is visible downstream rather than hidden.
+REGISTRY_DOMAINS = frozenset({
+    "mca.gov.in", "nseindia.com", "bseindia.com", "sebi.gov.in",
+    "zaubacorp.com", "tofler.in", "thecompanycheck.com", "instafinancials.com",
+    "quickcompany.in", "falconebiz.com", "opencorporates.com", "indiafilings.com",
 })
+
+# Editorially maintained, press, and financial-data sources.
+AUTHORITATIVE_DOMAINS = frozenset({
+    # financial / company data
+    "crunchbase.com", "pitchbook.com", "bloomberg.com", "reuters.com",
+    "tracxn.com", "theorg.com", "owler.com", "cbinsights.com",
+    # Indian business press
+    "economictimes.indiatimes.com", "business-standard.com", "livemint.com",
+    "financialexpress.com", "moneycontrol.com", "thehindubusinessline.com",
+    "businesstoday.in", "cnbctv18.com", "vccircle.com", "entrackr.com",
+    "inc42.com", "yourstory.com", "medianama.com", "thehindu.com",
+    "indianexpress.com", "timesofindia.indiatimes.com", "ndtv.com",
+    # international press
+    "forbes.com", "ft.com", "wsj.com", "techcrunch.com", "fortune.com",
+    "businessinsider.com", "cnbc.com",
+    # professional directories
+    "legal500.com", "chambers.com", "iflr1000.com",
+})
+
+# Page shapes that indicate a person-and-company assertion regardless of domain:
+# conference speaker pages, press releases, startup team pages.
+_CORROBORATING_PATH_RE = re.compile(
+    r"/(speakers?|press|news|newsroom|media|announcements?|blog|awards?|"
+    r"conference|summit|events?|team|about|leadership|management|people)\b",
+    re.IGNORECASE,
+)
 
 # Paths that indicate a company's own leadership/about page.
 LEADERSHIP_PATH_RE = re.compile(
@@ -83,20 +109,35 @@ def domain_of(url: str) -> str:
     return host[4:] if host.startswith("www.") else host
 
 
-def is_aggregator(url: str) -> bool:
-    """True for registry republications and contact scrapers — never independent."""
+def _matches(url: str, domains: frozenset[str]) -> bool:
     domain = domain_of(url)
-    return any(
-        domain == d or domain.endswith("." + d)
-        for d in (AGGREGATOR_DOMAINS | SCRAPER_DOMAINS)
-    )
+    return any(domain == d or domain.endswith("." + d) for d in domains)
+
+
+def is_aggregator(url: str) -> bool:
+    """True only for contact scrapers, which restate LinkedIn and add nothing."""
+    return _matches(url, SCRAPER_DOMAINS)
+
+
+def is_registry(url: str) -> bool:
+    """Statutory/registry filings — accepted, but recorded as the weaker class."""
+    return _matches(url, REGISTRY_DOMAINS)
 
 
 def is_authoritative(url: str) -> bool:
-    domain = domain_of(url)
-    return any(
-        domain == d or domain.endswith("." + d) for d in AUTHORITATIVE_DOMAINS
-    )
+    return _matches(url, AUTHORITATIVE_DOMAINS)
+
+
+def is_linkedin(url: str) -> bool:
+    return _matches(url, frozenset({"linkedin.com"}))
+
+
+def looks_like_editorial_page(url: str) -> bool:
+    """A press release, speaker page, or team page on any domain."""
+    try:
+        return bool(_CORROBORATING_PATH_RE.search(urlparse(url).path or ""))
+    except ValueError:
+        return False
 
 
 def looks_like_company_site(url: str, company: NormalizedCompany) -> bool:
@@ -130,6 +171,7 @@ def assess(
     happens to list a different person is not evidence about this person.
     """
     name_tokens = frozenset(name.tokens)
+    best: Corroboration | None = None
 
     for result in results:
         url = result.url or ""
@@ -145,20 +187,48 @@ def assess(
                 and not _contains_full_name(text, name):
             continue
 
-        # And the company must be corroborated independently of the person's name.
+        # And the company must be named too, independently of the person's name —
+        # otherwise an eponymous company corroborates itself.
         if company_token_coverage(company, text, exclude_tokens=name_tokens) < min_company_coverage:
             continue
 
+        # Any one of these is sufficient. They are checked strongest-first so the
+        # recorded source is the best available, but the first hit ends the search
+        # — requiring several sources per row costs recall and buys little.
         if looks_like_company_site(url, company):
-            kind = "official_site"
-            if LEADERSHIP_PATH_RE.search(urlparse(url).path or ""):
-                kind = "official_site_leadership"
+            kind = ("official_site_leadership"
+                    if LEADERSHIP_PATH_RE.search(urlparse(url).path or "")
+                    else "official_site")
             return Corroboration(True, url, kind, result.title[:160])
 
         if is_authoritative(url):
-            return Corroboration(True, url, "directory_or_press", result.title[:160])
+            return Corroboration(True, url, "press_or_financial_data", result.title[:160])
 
-    return Corroboration(False, "", "none", "no independent source named both the person and the company")
+        if looks_like_editorial_page(url):
+            return Corroboration(True, url, "press_release_or_speaker_page", result.title[:160])
+
+        if is_linkedin(url):
+            # A second LinkedIn surface (company page, post, or a different
+            # profile view) naming both. Weaker, so held back in case something
+            # better appears later in the result set.
+            best = best or Corroboration(True, url, "linkedin_secondary", result.title[:160])
+            continue
+
+        if is_registry(url):
+            # Accepted, but flagged: the input came from MCA data, so this
+            # confirms the directorship rather than the person's identity.
+            best = best or Corroboration(True, url, "registry_filing", result.title[:160])
+            continue
+
+        # An unclassified domain that names both is still real evidence.
+        best = best or Corroboration(True, url, "other_public_source", result.title[:160])
+
+    if best is not None:
+        return best
+    return Corroboration(
+        False, "", "none",
+        "no public source found naming both this person and this company",
+    )
 
 
 def _leading_name(text: str) -> str:

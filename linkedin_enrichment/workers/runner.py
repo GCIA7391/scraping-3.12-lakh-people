@@ -27,8 +27,7 @@ from ..search.client import SearchClient
 from ..search.query_builder import (
     Tier,
     company_roster_query,
-    person_fallback_query,
-    person_query,
+    person_query_variants,
     roster_covers_company,
 )
 
@@ -81,6 +80,9 @@ class LadderRunner:
         self.corroboration_queries = 0
         self.corroborated = 0
         self.corroboration_failed = 0
+        #: Which query variant produced each hit — shows whether the deeper
+        #: ladder is earning its cost.
+        self.variant_hits: dict[int, int] = {}
 
     async def _traced_search(self, query_text: str, tier: int, traces: list[QueryTrace]):
         """Issue a query and record exactly what came back.
@@ -108,6 +110,11 @@ class LadderRunner:
         outcome = await self._resolve_row(record, subject, traces)
         outcome.traces = traces
         outcome.subject = subject
+        # Count only queries that actually hit the network. A cache-served step
+        # costs nothing, and reporting it as a query would overstate the run's
+        # real cost — which is exactly what the estimate and the QC report are
+        # read for. Duplicated people therefore correctly show zero.
+        outcome.queries_used = sum(1 for t in traces if not t.from_cache)
         return outcome
 
     async def _resolve_row(
@@ -218,33 +225,52 @@ class LadderRunner:
                 queries_used=queries, tier=int(Tier.COMPANY_ROSTER),
             )
 
-        query = person_query(subject.name, subject.company, record["location"])
-        response = await self._traced_search(query.text, int(Tier.PERSON), traces)
-        queries += 1
-        self.tier2_queries += 1
+        # Work through every query formulation before concluding "not found".
+        # One failed search is not evidence of absence: a person missing from
+        # site:linkedin.com/in results is often named on a leadership page, in a
+        # funding announcement, or in a Crunchbase entry.
+        variants = person_query_variants(
+            subject.name, subject.company, record["location"]
+        )[: self.settings.max_person_queries]
 
-        results = list(response.results)
-        if not results and not response.error:
-            # Some free providers return nothing for `site:` queries; retry once
-            # without the operator. Precision is unaffected — the reject rules
-            # still discard every non-LinkedIn URL.
-            fallback = person_fallback_query(subject.name, subject.company)
-            response = await self._traced_search(fallback.text, int(Tier.PERSON), traces)
+        accumulated: list[SerpResult] = list(roster)
+        last_error = ""
+        match = None
+
+        for index, variant in enumerate(variants):
+            response = await self._traced_search(variant.text, int(Tier.PERSON), traces)
             queries += 1
             self.tier2_queries += 1
-            results = list(response.results)
 
-        if response.error:
+            if response.error:
+                # Record it and keep going — a throttle on one formulation says
+                # nothing about the others.
+                last_error = response.error
+                continue
+
+            last_error = ""
+            accumulated = dedupe_results(accumulated + list(response.results))
+
+            # Score against everything gathered so far, so evidence from earlier
+            # variants still counts toward the decision.
+            match = resolve(subject, accumulated, self.settings)
+            if match.matched:
+                self.variant_hits[index] = self.variant_hits.get(index, 0) + 1
+                break
+
+        if match is None:
+            # Every variant errored; nothing was ever scored.
             return RowOutcome(
                 row_uid,
-                MatchResult(Decision.BLANK_ERROR, notes=f"search failed: {response.error}"),
-                queries_used=queries, tier=int(Tier.PERSON), error=response.error,
+                MatchResult(
+                    Decision.BLANK_ERROR,
+                    notes=f"all {len(variants)} search variants failed; last: {last_error}",
+                ),
+                queries_used=queries, tier=int(Tier.PERSON), error=last_error,
             )
 
-        # Score against the person results plus the roster — the subject may appear
-        # in either, and merging gives the ambiguity check a complete field.
-        combined = dedupe_results(list(results) + list(roster))
-        match = resolve(subject, combined, self.settings)
+        results = accumulated
+        combined = accumulated
 
         if match.matched and self.settings.require_corroboration:
             match, used = await self._corroborate(subject, match, traces)
@@ -334,4 +360,5 @@ class LadderRunner:
             "corroboration_queries": self.corroboration_queries,
             "corroborated": self.corroborated,
             "corroboration_failed": self.corroboration_failed,
+            "variant_hits": dict(sorted(self.variant_hits.items())),
         }

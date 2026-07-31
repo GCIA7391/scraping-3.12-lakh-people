@@ -104,17 +104,29 @@ class TestDecisions:
 
 
 class TestQueryLadder:
-    def test_duplicate_row_costs_no_extra_query(self, enriched) -> None:
-        """The sample contains Girish Rowjee twice. Both rows must be resolved,
-        but the second must be served entirely from cache."""
+    def test_duplicate_person_is_never_searched_twice(self, enriched) -> None:
+        """The sample contains Girish Rowjee twice. Both rows resolve, but the
+        second is served entirely from cache.
+
+        Note this no longer asserts a total-query ceiling: the ladder now tries
+        several query formulations per person, deliberately trading queries for
+        recall. What must still hold is that the same person is never searched
+        twice.
+        """
         store, output, _ = enriched
         matches = [r for r in read_output(output) if r["Name"] == "Girish Rowjee"]
         assert len(matches) == 2
         assert all(r["LinkedIn Profile"] for r in matches)
 
-        total_queries = store.scalar("SELECT SUM(queries_used) FROM results") or 0
-        searchable = store.scalar("SELECT COUNT(*) FROM records WHERE status='done'") or 0
-        assert total_queries < searchable * 2, "ladder should beat the naive 2/person baseline"
+        rows = store._conn.execute(  # noqa: SLF001 - assertion detail
+            """
+            SELECT res.queries_used FROM results res
+            JOIN records r ON r.row_uid = res.row_uid
+            WHERE r.name = 'Girish Rowjee'
+            ORDER BY res.queries_used
+            """
+        ).fetchall()
+        assert rows[0]["queries_used"] == 0, "the duplicate must cost zero queries"
 
     def test_negative_cache_is_populated(self, enriched) -> None:
         store, _, _ = enriched

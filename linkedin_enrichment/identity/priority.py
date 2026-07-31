@@ -32,7 +32,10 @@ from dataclasses import dataclass, field
 from ..ingest.normalize import normalize_company, normalize_name
 from ..ingest.prefilter import looks_like_person
 
-# Role tiers. Ordered by seniority, weighted low because the field is noisy.
+# Role tiers, used for *ordering* only. The pool itself is deliberately wide:
+# for HNI prospecting a registry "Director" of a real operating company is a
+# legitimate lead, and excluding them discarded 271,775 rows — 87% of the file —
+# for no gain in usable output.
 STRICT_EXEC_ROLES = frozenset({
     "founder", "co-founder", "cofounder", "ceo", "chief executive officer",
     "chairman", "chairperson", "promoter", "president",
@@ -40,12 +43,31 @@ STRICT_EXEC_ROLES = frozenset({
 })
 SENIOR_ROLES = frozenset({
     "managing director", "joint managing director", "md & ceo",
-    "whole time director & ceo",
+    "whole time director & ceo", "managing partner", "senior partner",
 })
-OTHER_PREFERRED_ROLES = frozenset({
-    "executive director", "owner", "proprietor", "partner", "managing partner",
+HEAD_ROLES = frozenset({
+    "business head", "country head", "regional head", "division head",
+    "practice head", "global head", "head of india", "vertical head",
 })
-PREFERRED_ROLES = STRICT_EXEC_ROLES | SENIOR_ROLES | OTHER_PREFERRED_ROLES
+CXO_ROLES = frozenset({
+    "cto", "cfo", "coo", "cmo", "cio", "chro", "cro", "cso",
+    "chief technology officer", "chief financial officer",
+    "chief operating officer", "chief marketing officer",
+    "chief information officer", "chief people officer",
+})
+BOARD_ROLES = frozenset({
+    "executive director", "wholetime director", "whole time director",
+    "director", "board member", "nominee director", "additional director",
+    "independent director", "managing trustee", "trustee",
+})
+OWNER_ROLES = frozenset({
+    "owner", "proprietor", "partner", "principal", "co-owner",
+})
+
+PREFERRED_ROLES = (
+    STRICT_EXEC_ROLES | SENIOR_ROLES | HEAD_ROLES | CXO_ROLES
+    | BOARD_ROLES | OWNER_ROLES
+)
 
 _TOKEN_RE = re.compile(r"[^a-z ]+")
 
@@ -169,14 +191,19 @@ class Corpus:
 
 
 def role_score(designation: str) -> float:
-    role = (designation or "").strip().lower()
+    """Ordering weight only — never a reason to exclude a row."""
+    role = (designation or "").strip().lower().rstrip(".")
     if role in STRICT_EXEC_ROLES:
         return 1.0
-    if role in SENIOR_ROLES:
-        return 0.7
-    if role in OTHER_PREFERRED_ROLES:
-        return 0.45
-    return 0.0
+    if role in SENIOR_ROLES or role in CXO_ROLES:
+        return 0.8
+    if role in HEAD_ROLES:
+        return 0.65
+    if role in OWNER_ROLES:
+        return 0.5
+    if role in BOARD_ROLES:
+        return 0.35
+    return 0.2
 
 
 def name_quality(name: str) -> float:
@@ -200,6 +227,18 @@ def is_preferred_role(designation: str) -> bool:
 
 
 def role_company_implausibility(designation: str, company_size: int) -> float:
+    """DISABLED — always 0. Company size is not grounds for rejection.
+
+    This penalised founder-shaped titles at large employers on the theory that
+    "Founder, Apple India" is a registry artifact. Whether or not that is true of
+    any individual row, a large enterprise legitimately has many executives, and
+    corroboration is the right way to settle it — not a size rule applied before
+    anything has been searched. Kept as a named no-op so it is not reintroduced.
+    """
+    return 0.0
+
+
+def _legacy_role_company_implausibility(designation: str, company_size: int) -> float:
     """Penalty in [0, 1] for role/company combinations that cannot be real.
 
     Nobody founds Apple India. A "Founder" or "CEO" recorded against a large

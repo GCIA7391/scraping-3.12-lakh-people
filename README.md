@@ -267,6 +267,91 @@ Key settings:
 | `enable_negative_cache` | true | Skip everyone at footprint-less companies |
 | `llm.enabled` | false | Optional adjudication of borderline candidates |
 
+## Yield mode — ~1,000 usable HNI prospects
+
+The default for prospect generation. Optimises for leads a sales team can act on
+rather than for a statistical proof.
+
+```bash
+python main.py preflight
+python main.py run --input data/*.csv --yield --target 1000
+```
+
+| | |
+|---|---|
+| Threshold | **0.95** with corroboration (not 0.99) |
+| Pool | **the whole file** — every executive shape, including plain "Director" |
+| Company size | **never a rejection**; corroboration settles it instead |
+| Corroboration | **one strong public source is enough** |
+| Query ladder | **8+ formulations per person**, all tried before "no match" |
+| Stop | at `--target` matches, or genuine database exhaustion |
+
+### Why the pool is the whole file
+
+Restricting to "senior" titles discarded **271,775 rows — 87% of the file** —
+because that is how many are recorded as plain `Director`. For HNI prospecting a
+registry director of a real operating company is a legitimate lead. Role now
+orders the queue; it never excludes.
+
+Accepted titles: Founder, Co-Founder, CEO, President, Chairman, Vice Chairman,
+Managing Director, Joint MD, Executive Director, Whole Time Director, Director,
+Board Member, Partner, Senior Partner, Managing Partner, Principal, Owner,
+Proprietor, Promoter, CXO titles, and Business/Country/Regional/Division/
+Practice/Global Head.
+
+### Corroboration — one strong source
+
+Accepted: LinkedIn, company leadership and staff pages, press releases,
+conference speaker pages, news, Bloomberg, Crunchbase, PitchBook, Forbes,
+Economic Times, Business Standard, Financial Express, Moneycontrol, NSE/BSE and
+MCA filings, startup sites — and any unclassified domain that names both the
+person and the company.
+
+Only **contact scrapers** (RocketReach, ZoomInfo, Lusha) remain excluded: they
+restate LinkedIn and add no information.
+
+Registry filings are accepted but tagged `registry_filing` in the output, since
+the input was itself MCA-derived — they confirm the directorship rather than the
+identity. The source class is on every row so the sales team can see which kind
+of evidence backs each lead.
+
+### The search ladder no longer gives up early
+
+One failed search is not evidence of absence. Each person is tried against
+LinkedIn-scoped, plain-LinkedIn, bare name+company, leadership, executive,
+director, press-release, Crunchbase and Bloomberg formulations, stopping as soon
+as a match is confirmed. Evidence accumulates across variants, so a company hit
+from query 2 still counts when query 5 finds the profile.
+
+### If the target is not reached
+
+The final CSV is gated on the target. Fall short and you get
+`partial_matches.csv` plus a diagnosis naming the exact bottleneck:
+
+```
+  TARGET NOT MET — 1 accepted of 1,000 requested
+
+  WHERE EVERY ROW WENT
+    No candidate passed the name+company gates              7   87.5%
+    Accepted                                                1   12.5%
+
+  BOTTLENECK
+    No candidate passed the name+company gates — 7 rows (87.5% of processed)
+
+  COVERAGE
+    Companies searched          :         8
+    ...with a LinkedIn presence :         3  (37.5%)
+
+  WHY 1,000 WAS NOT REACHED
+    ... Bottom line: 1 of 8 processed rows converted (12.50%).
+    Reaching 1,000 at this rate needs 8,000 processed rows.
+```
+
+It distinguishes the cases that matter: rows never processed (resume), search
+failures (**infrastructure, not data** — the run has not fairly tested the file),
+no-candidate (the input's ceiling), low-confidence (convertible, see the review
+queue), and ambiguity (homonyms).
+
 ## Precision mode — ~1,000 profiles at ≥99%
 
 When the goal is a short, defensible list rather than coverage:

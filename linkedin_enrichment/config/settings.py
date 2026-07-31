@@ -206,6 +206,9 @@ class Settings:
     # coverage: ranked claim order, a preferred-role pool, mandatory independent
     # corroboration, and a stop once `target_matches` matches are found.
     precision_mode: bool = False
+    #: Optimise for usable yield: accept at 0.95 with corroboration, whole-file
+    #: pool, deep query ladder, run until the target or exhaustion.
+    yield_mode: bool = False
     #: Stop the run after this many matches (0 = no target).
     target_matches: int = 0
     #: Only process rows whose designation is a preferred role.
@@ -222,6 +225,11 @@ class Settings:
     review_queue_floor: float = 0.55
 
     # --- query ladder ---
+    #: How many query formulations to try per person before calling it a
+    #: non-match. One failed search is not evidence of absence, so the ladder
+    #: works through several phrasings (LinkedIn-scoped, leadership page, press,
+    #: Crunchbase, ...) and stops early as soon as a match is confirmed.
+    max_person_queries: int = 6
     enable_company_tier: bool = True      # Tier 1: one roster query per company
     enable_person_tier: bool = True       # Tier 2: per-person query
     enable_negative_cache: bool = True    # Tier 1b: skip everyone at footprint-less companies
@@ -274,6 +282,8 @@ class Settings:
 
         if settings.precision_mode:
             settings._apply_precision_defaults()
+        if settings.yield_mode:
+            settings._apply_yield_defaults()
         settings._validate()
         return settings
 
@@ -309,6 +319,26 @@ class Settings:
         self.calibration.source = (
             f"{path.name} (fitted from {self.calibration.fitted_from_labels} labels)"
         )
+
+    def _apply_yield_defaults(self) -> None:
+        """Yield mode: produce usable HNI prospects, not a statistical proof.
+
+        The business objective is at least ``target_matches`` leads a sales team
+        can act on. So: accept at 0.95 with corroboration rather than holding out
+        for 0.99, work the whole file rather than a narrow role pool, try every
+        query formulation before calling a row a non-match, and keep going until
+        the target is met or the database is exhausted.
+        """
+        self.confidence_threshold = min(self.confidence_threshold, 0.95)
+        # One strong corroborating source is still required — it is what keeps
+        # precision practical while the threshold comes down.
+        self.require_corroboration = True
+        # The pool is everyone. Ranking decides the order, never the membership.
+        self.preferred_roles_only = False
+        if not self.target_matches:
+            self.target_matches = 1000
+        self.max_person_queries = max(self.max_person_queries, 8)
+        self.review_queue_floor = min(self.review_queue_floor, 0.70)
 
     def _apply_precision_defaults(self) -> None:
         """Turn on everything precision mode implies, unless explicitly overridden.

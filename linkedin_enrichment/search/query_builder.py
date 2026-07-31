@@ -93,6 +93,48 @@ def person_fallback_query(name: NormalizedName, company: NormalizedCompany) -> Q
     )
 
 
+def person_query_variants(
+    name: NormalizedName, company: NormalizedCompany, location: str = "",
+) -> list[Query]:
+    """Every query worth trying for one person, in descending expected value.
+
+    A single query formulation misses a great deal: a person absent from
+    ``site:linkedin.com/in`` results may be named on the company's leadership
+    page, in a funding announcement, or in a Crunchbase entry. The ladder runs
+    through all of these before a row is called a non-match — one failed search
+    is not evidence of absence.
+
+    Ordered so the cheapest, highest-yield formulations run first; the runner
+    stops as soon as a match is confirmed, so later variants only cost anything
+    for rows that would otherwise have been abandoned.
+    """
+    person, brand = _quote(name.display), _quote(company.brand)
+    templates = [
+        f"{person} {brand} site:linkedin.com/in",
+        f"{person} {brand} LinkedIn",
+        f"{person} {brand}",
+        f"{person} {brand} leadership",
+        f"{person} {brand} executive",
+        f"{person} {brand} director",
+        f"{person} {brand} press release",
+        f"{person} {brand} crunchbase",
+        f"{person} {brand} bloomberg",
+        f"{person} {company.brand} profile",
+    ]
+    if location:
+        templates.insert(2, f"{person} {brand} {location}")
+
+    seen: set[str] = set()
+    queries: list[Query] = []
+    for text in templates:
+        normalised = " ".join(text.split())
+        if normalised in seen:
+            continue
+        seen.add(normalised)
+        queries.append(Query(text=normalised, tier=Tier.PERSON, company_key=company.key))
+    return queries
+
+
 def roster_covers_company(results, company: NormalizedCompany, name_tokens=frozenset()) -> bool:
     """Does this roster show any real evidence of the company on LinkedIn?
 

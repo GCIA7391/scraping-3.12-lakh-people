@@ -36,6 +36,7 @@ from linkedin_enrichment.ingest import prefilter
 from linkedin_enrichment.ingest.reader import read_all
 from linkedin_enrichment.logging import dashboard as dash
 from linkedin_enrichment.logging import setup as log_setup
+from linkedin_enrichment.output import bottleneck as bottleneck_mod
 from linkedin_enrichment.output import explain as explain_mod
 from linkedin_enrichment.output import report as report_mod
 from linkedin_enrichment.output import review_queue, top_matches, writer
@@ -230,7 +231,7 @@ def cmd_run(args, settings: Settings) -> int:
         # pool, both of which live in columns that only `rank` populates. Without
         # this, a fresh database would match nothing at all and look like a
         # finding rather than a missing step.
-        if settings.precision_mode:
+        if settings.precision_mode or settings.yield_mode:
             ranked_already = store.scalar(
                 "SELECT COUNT(*) FROM records WHERE priority > 0"
             ) or 0
@@ -254,19 +255,33 @@ def cmd_run(args, settings: Settings) -> int:
         # rather than appearing as a bare "not processed".
         store.record_unresolved_results()
 
+        stats = store.get_stats(run_id)
+        stats_for_bottleneck = {k: _num(v) for k, v in stats.items()}
+
         outputs = writer.write_all(store, settings.output_dir)
         review_path = review_queue.write_review_queue(store, settings.output_dir)
-        # The ranked deliverable belongs to precision mode. Emitting it from a
-        # coverage run would present a "top matches" file that is not the
-        # precision deliverable it looks like.
+        # The ranked deliverable belongs to precision/yield mode. Emitting it from
+        # a coverage run would present a "top matches" file that is not the
+        # deliverable it looks like.
         top_path, top_n = (None, 0)
-        if settings.precision_mode:
-            top_path, top_n = top_matches.write_top_matches(
-                store, settings.output_dir,
-                limit=settings.target_matches or 1000,
-            )
+        if settings.precision_mode or settings.yield_mode:
+            bn = bottleneck_mod.build(store, settings, stats_for_bottleneck)
+            if bn.target_met:
+                top_path, top_n = top_matches.write_top_matches(
+                    store, settings.output_dir,
+                    limit=settings.target_matches or 1000,
+                )
+            else:
+                # The final CSV is gated on the target. Shipping a short list as
+                # if it were the deliverable hides the shortfall; the diagnosis
+                # below is the useful output instead.
+                top_path, top_n = top_matches.write_top_matches(
+                    store, settings.output_dir,
+                    limit=settings.target_matches or 1000,
+                    filename="partial_matches.csv",
+                )
+            print(bottleneck_mod.render(bn))
 
-        stats = store.get_stats(run_id)
         qc = report_mod.build_report(
             store, settings, run_id=run_id, elapsed=time.time() - started,
             search_stats={k: _num(v) for k, v in stats.items() if k.startswith(("quer", "search", "throttle", "current"))},
@@ -646,6 +661,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="run even if preflight says searches are not working")
         sp.add_argument("--precision", action="store_true",
                         help="precision mode: >=0.99, ranked, preferred roles, corroboration required")
+        sp.add_argument("--yield", action="store_true", dest="yield_mode",
+                        help="yield mode: >=0.95 with corroboration, whole file, deep query "
+                             "ladder, run until --target matches or the database is exhausted")
         sp.add_argument("--target", type=int, dest="target_matches",
                         help="stop once this many matches are found (default 1000 in precision mode)")
 
@@ -726,6 +744,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["dashboard"] = False
     if getattr(args, "precision", False):
         overrides["precision_mode"] = True
+    if getattr(args, "yield_mode", False):
+        overrides["yield_mode"] = True
     if getattr(args, "target_matches", None):
         overrides["target_matches"] = args.target_matches
     if getattr(args, "provider", None):

@@ -74,19 +74,22 @@ class TestNameRarity:
         assert corpus.name_rarity("Kumar Thallapragada0") > corpus.name_rarity("Praveen Kumar")
 
 
-class TestImplausibleRoles:
-    def test_founder_of_a_huge_subsidiary_is_penalised(self, corpus) -> None:
-        """Nobody founds Apple India. These topped the first ranking pass."""
-        assert priority.role_company_implausibility("founder", 78) > 0.5
-        assert priority.role_company_implausibility("ceo", 53) > 0.5
+class TestCompanySizeIsNotRejection:
+    """Company size must never exclude a row. A large enterprise legitimately
+    has many executives; corroboration settles it, not a pre-search size rule."""
 
-    def test_small_company_founder_is_not_penalised(self, corpus) -> None:
-        assert priority.role_company_implausibility("founder", 3) == 0.0
+    @pytest.mark.parametrize("role,size", [
+        ("founder", 78), ("ceo", 53), ("executive director", 299), ("partner", 38),
+    ])
+    def test_size_penalty_is_disabled(self, role: str, size: int) -> None:
+        assert priority.role_company_implausibility(role, size) == 0.0
 
-    def test_non_founder_roles_are_never_penalised(self, corpus) -> None:
-        """Both verified matches hold exactly these titles at huge employers."""
-        assert priority.role_company_implausibility("executive director", 299) == 0.0
-        assert priority.role_company_implausibility("partner", 38) == 0.0
+    def test_exec_at_a_huge_employer_still_scores(self, corpus) -> None:
+        score = priority.score_row(
+            corpus, "Person1 Thallapragada1",
+            "Wells Fargo International Solutions Private Limited", "executive director",
+        )
+        assert score > 400
 
 
 class TestTitleDilutionStaysDisabled:
@@ -142,11 +145,18 @@ class TestPreferredRoles:
     def test_preferred_roles_recognised(self, role: str) -> None:
         assert priority.is_preferred_role(role)
 
-    @pytest.mark.parametrize("role", ["director", "wholetime director", ""])
-    def test_plain_director_is_not_preferred(self, role: str) -> None:
-        assert not priority.is_preferred_role(role)
+    @pytest.mark.parametrize("role", [
+        "director", "wholetime director", "business head", "country head",
+        "cto", "cfo", "board member", "principal", "senior partner",
+    ])
+    def test_expanded_pool_includes_all_executive_shapes(self, role: str) -> None:
+        """The pool is deliberately wide. Excluding plain "Director" discarded
+        271,775 rows — 87% of the file — for no gain in usable output."""
+        assert priority.is_preferred_role(role)
 
-    def test_role_ordering(self) -> None:
+    def test_role_ordering_still_ranks_seniority(self) -> None:
+        """Role orders the queue; it never excludes."""
         assert priority.role_score("founder") > priority.role_score("managing director")
-        assert priority.role_score("managing director") > priority.role_score("partner")
-        assert priority.role_score("director") == 0.0
+        assert priority.role_score("managing director") > priority.role_score("business head")
+        assert priority.role_score("business head") > priority.role_score("director")
+        assert priority.role_score("director") > 0.0, "director must never score zero"

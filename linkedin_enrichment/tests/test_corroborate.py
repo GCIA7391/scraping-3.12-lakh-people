@@ -36,30 +36,52 @@ class TestSourceClassification:
         "https://www.zaubacorp.com/company/X-PRIVATE-LIMITED/U72200KA",
         "https://tofler.in/x-private-limited/company/U72200KA",
         "https://www.thecompanycheck.com/company/x",
-        "https://m.indiamart.com/nayak-impex",
-        "https://www.instafinancials.com/company/x",
+        "https://www.mca.gov.in/filing/x",
+        "https://www.nseindia.com/companies/x",
     ])
-    def test_registry_republications_are_not_independent(self, url: str) -> None:
-        """These restate the MCA registry the input came from."""
-        assert is_aggregator(url)
+    def test_registry_filings_are_accepted(self, url: str) -> None:
+        """Registry and statutory filings count as corroboration.
+
+        For an HNI prospect list, a filing naming the person against the company
+        is the confirmation a sales team needs. They are classified separately so
+        the weaker provenance stays visible — the input was itself MCA-derived,
+        so a registry hit confirms the directorship rather than the identity.
+        """
+        from linkedin_enrichment.identity.corroborate import is_registry
+        assert is_registry(url)
+        assert not is_aggregator(url), "registry filings are no longer excluded"
 
     @pytest.mark.parametrize("url", [
         "https://rocketreach.co/girish-rowjee-email_1786181",
         "https://www.zoominfo.com/p/Chandrima-Mitra/3525821859",
         "https://www.signalhire.com/profiles/x",
     ])
-    def test_contact_scrapers_are_not_independent(self, url: str) -> None:
-        """These restate LinkedIn, so they cannot corroborate LinkedIn."""
+    def test_contact_scrapers_remain_excluded(self, url: str) -> None:
+        """The one class that adds nothing: they restate LinkedIn, often stale."""
         assert is_aggregator(url)
 
     @pytest.mark.parametrize("url", [
         "https://www.legal500.com/firms/32792-dsk-legal/lawyers/552761",
         "https://www.crunchbase.com/person/girish-rowjee",
+        "https://pitchbook.com/profiles/person/x",
+        "https://www.bloomberg.com/profile/person/x",
         "https://economictimes.indiatimes.com/x",
+        "https://www.financialexpress.com/x",
+        "https://www.business-standard.com/x",
+        "https://www.forbes.com/profile/x",
     ])
-    def test_editorial_sources_are_authoritative(self, url: str) -> None:
+    def test_press_and_financial_data_are_authoritative(self, url: str) -> None:
         assert is_authoritative(url)
         assert not is_aggregator(url)
+
+    @pytest.mark.parametrize("url", [
+        "https://someco.com/press/series-b-announcement",
+        "https://conference.example/speakers/jane-doe",
+        "https://startup.example/team",
+    ])
+    def test_press_and_speaker_pages_count_on_any_domain(self, url: str) -> None:
+        from linkedin_enrichment.identity.corroborate import looks_like_editorial_page
+        assert looks_like_editorial_page(url)
 
 
 class TestCompanySiteDetection:
@@ -110,14 +132,48 @@ class TestRealCases:
         )
         assert not evidence.found
 
-    def test_registry_aggregator_alone_does_not_corroborate(self) -> None:
-        """The strongest-looking evidence that is worth nothing: a page that
-        names both, sourced from the same registry as the input."""
+    def test_registry_filing_corroborates_but_is_labelled_as_such(self) -> None:
+        """Accepted for yield, flagged for provenance.
+
+        A registry filing naming the person against the company is usable
+        confirmation for a sales team. It is recorded as `registry_filing` rather
+        than dressed up as independent, because the input was MCA-derived: it
+        confirms the directorship, not that the LinkedIn profile is the same
+        human.
+        """
         evidence = assess(
             [result(
                 "GIRISH ROWJEE - Director - GREYTIP SOFTWARE PRIVATE LIMITED | ZaubaCorp",
                 "https://www.zaubacorp.com/company/GREYTIP-SOFTWARE-PRIVATE-LIMITED",
                 "Girish Rowjee is a director of Greytip Software Private Limited",
+            )],
+            normalize_name("Girish Rowjee"),
+            normalize_company("Greytip Software Private Limited"),
+        )
+        assert evidence.found
+        assert evidence.kind == "registry_filing"
+
+    def test_a_stronger_source_outranks_a_registry_filing(self) -> None:
+        """When both are present the better provenance is the one recorded."""
+        evidence = assess(
+            [
+                result("X - ZaubaCorp", "https://www.zaubacorp.com/company/GREYTIP-SOFTWARE",
+                       "Girish Rowjee director of Greytip Software"),
+                result("Girish Rowjee - Crunchbase", "https://www.crunchbase.com/person/girish-rowjee",
+                       "Co-founder and CEO of Greytip Software"),
+            ],
+            normalize_name("Girish Rowjee"),
+            normalize_company("Greytip Software Private Limited"),
+        )
+        assert evidence.found
+        assert evidence.kind == "press_or_financial_data"
+
+    def test_contact_scraper_alone_still_does_not_corroborate(self) -> None:
+        evidence = assess(
+            [result(
+                "Girish Rowjee Email & Phone | Greytip Software CEO",
+                "https://rocketreach.co/girish-rowjee-email_1786181",
+                "Girish Rowjee, CEO at Greytip Software",
             )],
             normalize_name("Girish Rowjee"),
             normalize_company("Greytip Software Private Limited"),
