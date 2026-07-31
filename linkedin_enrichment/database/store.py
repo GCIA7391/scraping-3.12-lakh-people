@@ -729,6 +729,26 @@ class Store:
         correct = int(row["c"] or 0)
         return correct, int(row["n"] or 0) - correct
 
+    def iter_labelled_scores(self) -> list[tuple[float, int]]:
+        """(raw_score, correct) for every hand-labelled row — the calibration fit set.
+
+        This is the join that turns hours of human labelling into an improved
+        model: ``validation_labels`` supplies the verdict, ``results.top_score``
+        the raw score that produced it. Both were already stored; nothing
+        connected them until now.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT res.top_score AS score, v.correct AS correct
+                FROM validation_labels v
+                JOIN results res ON res.row_uid = v.row_uid
+                WHERE res.top_score > 0
+                ORDER BY res.top_score
+                """
+            ).fetchall()
+        return [(float(r["score"]), int(r["correct"])) for r in rows]
+
     def unlabelled_matches(self, limit: int) -> list[sqlite3.Row]:
         """Delivered matches not yet judged, highest confidence first."""
         with self._lock:

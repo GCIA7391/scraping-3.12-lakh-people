@@ -256,10 +256,15 @@ def cmd_run(args, settings: Settings) -> int:
 
         outputs = writer.write_all(store, settings.output_dir)
         review_path = review_queue.write_review_queue(store, settings.output_dir)
-        top_path, top_n = top_matches.write_top_matches(
-            store, settings.output_dir,
-            limit=settings.target_matches or 1000,
-        )
+        # The ranked deliverable belongs to precision mode. Emitting it from a
+        # coverage run would present a "top matches" file that is not the
+        # precision deliverable it looks like.
+        top_path, top_n = (None, 0)
+        if settings.precision_mode:
+            top_path, top_n = top_matches.write_top_matches(
+                store, settings.output_dir,
+                limit=settings.target_matches or 1000,
+            )
 
         stats = store.get_stats(run_id)
         qc = report_mod.build_report(
@@ -273,7 +278,8 @@ def cmd_run(args, settings: Settings) -> int:
 
     print(f"\nenriched files : {', '.join(str(p) for p in outputs)}")
     print(f"review queue   : {review_path}")
-    print(f"top matches    : {top_path}  ({top_n:,} rows)")
+    if top_path is not None:
+        print(f"top matches    : {top_path}  ({top_n:,} rows)")
     return 0
 
 
@@ -347,14 +353,35 @@ def cmd_estimate(args, settings: Settings) -> int:
         if not settings.input_paths:
             print("estimate needs --queries N or --input FILE...", file=sys.stderr)
             return 2
-        companies, searchable = set(), 0
+        companies, searchable, preferred = set(), 0, 0
         for row in read_all(settings.input_paths):
             verdict = prefilter.evaluate(row)
             if verdict.searchable:
                 searchable += 1
                 companies.add(verdict.company.key)
-        queries = len(companies) + int(searchable * 0.25)
-        print(f"projected queries (Tier 1 + Tier 2 @ 25% footprint): {queries:,}\n")
+                if priority.is_preferred_role(row.designation):
+                    preferred += 1
+
+        if settings.precision_mode:
+            # Precision mode works only the preferred-role pool, and each
+            # candidate that clears the score costs one further query to
+            # corroborate. Omitting that understated the budget by roughly the
+            # match count, which on a 1,000-match target is 1,000 queries.
+            pool = preferred
+            tier1 = min(len(companies), pool)
+            tier2 = int(pool * 0.25)
+            corroboration = int(pool * 0.25 * 0.35)
+            queries = tier1 + tier2 + corroboration
+            print(
+                f"precision mode: preferred-role pool {pool:,}\n"
+                f"  Tier 1 (company)   {tier1:>9,}\n"
+                f"  Tier 2 (person)    {tier2:>9,}\n"
+                f"  corroboration      {corroboration:>9,}   (one per scoring candidate)\n"
+                f"  projected total    {queries:>9,}\n"
+            )
+        else:
+            queries = len(companies) + int(searchable * 0.25)
+            print(f"projected queries (Tier 1 + Tier 2 @ 25% footprint): {queries:,}\n")
 
     rate = settings.rate_limit.requests_per_second
     print(f"{'provider':<14}{'$/1k':>9}{'total $':>12}{'daily cap':>12}{'wall-clock':>16}")
@@ -552,10 +579,34 @@ def cmd_calibrate(args, settings: Settings) -> int:
     isotonic knots to paste into ``calibration.isotonic_points`` and reports the
     raw-score cut point achieving the requested precision.
     """
-    from linkedin_enrichment.identity.calibrate import fit_from_csv
+    from linkedin_enrichment.identity.calibrate import fit_from_csv, fit_from_labels
 
-    result = fit_from_csv(args.labels, target_precision=settings.confidence_threshold)
+    if args.labels:
+        result = fit_from_csv(args.labels, target_precision=settings.confidence_threshold)
+    else:
+        with Store(settings.db_path) as store:
+            try:
+                result = fit_from_labels(
+                    store, target_precision=settings.confidence_threshold
+                )
+            except ValueError as exc:
+                print(f"{exc}", file=sys.stderr)
+                return 2
+
     print(result.render())
+
+    if args.write:
+        path = Path(settings.output_dir) / Settings.CALIBRATION_FILENAME
+        result.write(path)
+        print(f"\nfitted calibration written to {path}")
+        print("It is loaded automatically on the next run — no manual editing.")
+        if result.threshold_raw_score is not None:
+            print(
+                "\nThe recommended raw-score cut is REPORTED, NOT APPLIED: adopting it\n"
+                "changes how many rows qualify, which is your decision to make."
+            )
+    else:
+        print("\n(pass --write to save this so the pipeline actually uses it)")
     return 0
 
 
@@ -621,6 +672,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("estimate", help="cost and wall-clock per provider")
     add_input(p)
+    p.add_argument("--precision", action="store_true",
+                   help="budget for precision mode (preferred pool + corroboration)")
     p.add_argument("--queries", type=int, help="query count to price (skips reading inputs)")
 
     p = sub.add_parser("rank", help="score every row's offline priority for precision mode")
@@ -649,7 +702,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--note", help="reason, stored with the tombstone")
 
     p = sub.add_parser("calibrate", help="fit the score-to-probability mapping")
-    p.add_argument("--labels", required=True, help="CSV with raw_score,correct columns")
+    p.add_argument("--labels",
+                   help="CSV with raw_score,correct columns "
+                        "(default: use labels collected by `validate`)")
+    p.add_argument("--write", action="store_true",
+                   help="save the fit so the pipeline loads it automatically")
 
     return parser
 

@@ -71,6 +71,15 @@ class CalibrationConfig:
     slope: float = 22.0         # higher = sharper transition
     #: Fitted (raw, probability) knots from ``calibrate``; empty = use the logistic.
     isotonic_points: list[tuple[float, float]] = field(default_factory=list)
+    #: Number of hand-labelled rows the fit came from. 0 = shipped prior, never
+    #: measured. Surfaced in the QC report so a reader always knows which is which.
+    fitted_from_labels: int = 0
+    #: Where the fitted curve was loaded from, for provenance in the report.
+    source: str = "shipped prior (logistic, not fitted)"
+
+    @property
+    def is_fitted(self) -> bool:
+        return bool(self.isotonic_points) and self.fitted_from_labels > 0
 
 
 @dataclass
@@ -252,6 +261,14 @@ class Settings:
         settings._apply_env()
 
         if overrides:
+            # output_dir must be resolved before the fitted calibration is looked
+            # for, since that is where calibrate writes it.
+            if "output_dir" in overrides and overrides["output_dir"]:
+                settings.output_dir = overrides["output_dir"]
+
+        settings._load_fitted_calibration()
+
+        if overrides:
             # CLI wins over everything; drop None so unset flags don't clobber config.
             settings._apply_mapping({k: v for k, v in overrides.items() if v is not None})
 
@@ -259,6 +276,39 @@ class Settings:
             settings._apply_precision_defaults()
         settings._validate()
         return settings
+
+    #: Written by ``main.py calibrate --write``, read back automatically.
+    CALIBRATION_FILENAME = "calibration.yaml"
+
+    def _load_fitted_calibration(self) -> None:
+        """Pick up a calibration fitted from hand-labelled data, if one exists.
+
+        Loaded rather than hand-pasted: a fitted curve that requires manual
+        transcription into the config does not survive a real workflow, and the
+        labels it came from were expensive. Loading is logged and reported so a
+        run can never quietly score against a different curve than the reader of
+        its output assumes.
+        """
+        path = Path(self.output_dir) / self.CALIBRATION_FILENAME
+        if not path.exists():
+            return
+        try:
+            raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            return
+
+        block = raw.get("calibration") or {}
+        points = block.get("isotonic_points") or []
+        if not points:
+            return
+
+        self.calibration.isotonic_points = [(float(x), float(y)) for x, y in points]
+        self.calibration.fitted_from_labels = int(block.get("fitted_from_labels", 0) or 0)
+        # Filename only — the full temp/output path wraps badly in the report and
+        # the provenance that matters is "fitted, and from how many labels".
+        self.calibration.source = (
+            f"{path.name} (fitted from {self.calibration.fitted_from_labels} labels)"
+        )
 
     def _apply_precision_defaults(self) -> None:
         """Turn on everything precision mode implies, unless explicitly overridden.

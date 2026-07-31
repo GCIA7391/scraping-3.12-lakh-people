@@ -335,22 +335,51 @@ rules do that. Three things were learned building it, each the hard way:
   38 partners — demoted *both* live-verified matches to the 96th percentile. The
   rule was removed and is kept as a documented no-op so it is not reintroduced.
 
-### Proving the 99%
+### Proving the 99% — and feeding it back
 
 The pipeline reports a *calibrated model score*. That is not a measured
-precision, and it should not be quoted as one. `python main.py validate` presents
-each match with its evidence for a one-keystroke verdict and reports the Wilson
-95% lower bound:
+precision, and the QC report refuses to present it as one until you validate:
 
-| Labelled | Errors | Lower bound |
+```
+  PRECISION
+    Confidence threshold :         0.99
+    Calibration in force : shipped prior (logistic, not fitted)
+    Measured precision   :          none — NOT YET VALIDATED
+
+    The confidence above is a calibrated MODEL SCORE, not a measured
+    precision. Do not quote it as one. Run `python main.py validate`:
+    381 rows labelled with zero errors give a 95% lower bound of 0.9900.
+```
+
+| Labelled | Errors | Wilson 95% lower bound |
 |---|---|---|
 | 381 | 0 | **0.9900** |
 | 381 | 1 | 0.9860 |
 | 100 | 0 | 0.9630 |
 
-**381 rows, all correct, is the cheapest honest route to a ≥99% claim.** One
-error and the target moves out of reach at that sample size. Until then the
-report says "model score, precision not yet measured".
+**381 rows, all correct, is the cheapest honest route to a ≥99% claim.**
+
+The labelling is a closed loop — the effort improves the model, it does not just
+produce a number:
+
+```bash
+python main.py run --precision      # matches, each with its raw score
+python main.py validate             # one keystroke per row, saved as you go
+python main.py calibrate --write    # fits from those labels, saves the curve
+python main.py report               # now quotes a MEASURED precision
+```
+
+`calibrate` reads the labels straight from the database and writes
+`out/calibration.yaml`, which later runs load automatically — nothing is pasted
+by hand. The report then names the calibration in force, so a run can never
+quietly score against a different curve than the reader assumes.
+
+**The refitted threshold is reported, never auto-applied.** A fit may conclude
+that ≥99% needs a raw-score cut of 0.83 rather than 0.759. Adopting that changes
+how many rows qualify, so it is your explicit decision, not a silent one.
+
+If the measured lower bound comes in under your threshold, the report says so
+directly rather than letting the threshold look proven.
 
 At a true 99%, a 1,000-row deliverable still contains ~10 wrong profiles.
 

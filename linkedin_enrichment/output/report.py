@@ -61,6 +61,25 @@ class QCReport:
     inconclusive_searches: int = 0
     queries_issued: int = 0
 
+    # --- precision provenance ---
+    confidence_threshold: float = 0.95
+    calibration_source: str = ""
+    labels_correct: int = 0
+    labels_incorrect: int = 0
+
+    @property
+    def labelled(self) -> int:
+        return self.labels_correct + self.labels_incorrect
+
+    @property
+    def measured_precision(self) -> float:
+        return self.labels_correct / self.labelled if self.labelled else 0.0
+
+    @property
+    def precision_lower_bound(self) -> float:
+        from ..identity.calibrate import wilson_lower_bound
+        return wilson_lower_bound(self.labels_correct, self.labelled)
+
     @property
     def match_rate(self) -> float:
         return (self.matched / self.processed_rows) if self.processed_rows else 0.0
@@ -96,6 +115,12 @@ class QCReport:
             "match_rate": round(self.match_rate, 4),
             "processing_time_seconds": round(self.elapsed_seconds, 2),
             "review_queue_size": self.review_queue_size,
+            "confidence_threshold": self.confidence_threshold,
+            "calibration_source": self.calibration_source,
+            "labels_correct": self.labels_correct,
+            "labels_incorrect": self.labels_incorrect,
+            "measured_precision": round(self.measured_precision, 4) if self.labelled else None,
+            "precision_lower_bound": round(self.precision_lower_bound, 4) if self.labelled else None,
             "deferred_rows": self.deferred_rows,
             "inconclusive_searches": self.inconclusive_searches,
             "inconclusive_rate": round(self.inconclusive_rate, 4),
@@ -111,6 +136,14 @@ class QCReport:
             "caches": self.caches,
         }
         return data
+
+
+def _label_counts(store) -> tuple[int, int]:
+    """(correct, incorrect) hand-labels, tolerating a store without the table."""
+    try:
+        return store.label_counts()
+    except Exception:  # noqa: BLE001 - reporting must never fail the run
+        return (0, 0)
 
 
 def build_report(store, settings, *, run_id: str, elapsed: float,
@@ -145,6 +178,10 @@ def build_report(store, settings, *, run_id: str, elapsed: float,
         search=search_stats or {},
         ladder=ladder_stats or {},
         caches=cache_stats or {},
+        confidence_threshold=settings.confidence_threshold,
+        calibration_source=getattr(settings.calibration, "source", ""),
+        labels_correct=_label_counts(store)[0],
+        labels_incorrect=_label_counts(store)[1],
         deferred_rows=store.scalar(
             "SELECT COUNT(*) FROM records WHERE status = 'deferred'"
         ) or 0,
@@ -207,6 +244,32 @@ def render_text(report: QCReport) -> str:
         add("")
         add("    Do this: `python main.py preflight`, fix what it reports, then")
         add("             `python main.py retry` (add --reset if attempts were exhausted).")
+    add("")
+
+    # Whether the headline confidence is a measurement or a model output is the
+    # first thing a reader needs, because it decides whether the number can be
+    # quoted to anyone.
+    add("  PRECISION")
+    add(f"    Confidence threshold : {report.confidence_threshold:>12.2f}")
+    if report.calibration_source:
+        add(f"    Calibration in force : {report.calibration_source}")
+    if report.labelled:
+        add(f"    Hand-labelled        : {report.labelled:>12,}"
+            f"  (correct {report.labels_correct:,}, incorrect {report.labels_incorrect:,})")
+        add(f"    Measured precision   : {report.measured_precision:>12.4f}")
+        add(f"    Wilson 95% lower bnd : {report.precision_lower_bound:>12.4f}"
+            "   <- quote THIS number")
+        if report.precision_lower_bound < report.confidence_threshold:
+            add("")
+            add(f"    NOTE: the measured lower bound is below the "
+                f"{report.confidence_threshold:.2f} threshold.")
+            add("    Label more rows, or the threshold is not yet supported by evidence.")
+    else:
+        add("    Measured precision   :          none — NOT YET VALIDATED")
+        add("")
+        add("    The confidence above is a calibrated MODEL SCORE, not a measured")
+        add("    precision. Do not quote it as one. Run `python main.py validate`:")
+        add("    381 rows labelled with zero errors give a 95% lower bound of 0.9900.")
     add("")
 
     add("  ROWS")
