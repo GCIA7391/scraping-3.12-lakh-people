@@ -1,0 +1,37 @@
+name: tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # The whole suite replays recorded search responses through the cassette
+      # provider, so it needs no network access and no API keys.
+      - name: Run tests
+        run: pytest -q
+
+      - name: Verify the CLI is wired up
+        run: |
+          python main.py --help
+          python main.py estimate --queries 216277

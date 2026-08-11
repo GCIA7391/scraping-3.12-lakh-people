@@ -1,0 +1,25 @@
+# Core matching / normalisation
+rapidfuzz==3.14.5        # token-set + Jaro-Winkler similarity (C++ backed, fast at 312k scale)
+Unidecode==1.4.0         # transliteration folding for Indian names
+jellyfish==1.2.1         # phonetic (metaphone) fallback for transliteration variants
+
+# I/O
+aiohttp==3.14.3          # async HTTP for search providers
+openpyxl==3.1.5          # .xlsx / .xltx worksheet ingestion
+PyYAML>=6.0              # config file
+
+# UX
+rich==15.0.0             # live dashboard + progress
+
+# Optional: calibration (main.py calibrate). Not needed for a normal run.
+# scikit-learn==1.9.0
+
+# Optional: free DuckDuckGo provider (providers/duckduckgo.py degrades gracefully if absent)
+# ddgs==9.14.4
+
+# Optional: LLM adjudication stage (identity/llm_adjudicator.py, off by default)
+# anthropic>=0.40.0
+
+# Tests
+pytest==9.1.1
+pytest-asyncio

@@ -1,0 +1,104 @@
+[
+  {
+    "_comment": "PREFLIGHT CANARY. Keyed to preflight.CANARY_QUERY so the cassette provider can demonstrate a SUCCESS verdict offline. Same recorded payload as case 1 in real_validated.json.",
+    "query": "\"Girish Rowjee\" \"Greytip Software\" LinkedIn",
+    "provider": "fixture",
+    "results": [
+      {"title": "Girish Rowjee - Greytip Software Pvt. Ltd. | LinkedIn", "url": "https://www.linkedin.com/in/girishrowjee/", "snippet": "Bengaluru, Karnataka, India", "rank": 0},
+      {"title": "Greytip Software Pvt. Ltd. | LinkedIn", "url": "https://www.linkedin.com/company/greytip-software-pvt-ltd-", "snippet": "", "rank": 1}
+    ]
+  },
+  {
+    "_comment": "Ladder-keyed cassettes. The result payloads are the SAME recorded real responses as in real_validated.json; only the query keys differ, because query_builder emits normalised brand/name forms. Keeping the two files separate preserves real_validated.json as a pristine record of what was actually observed live.",
+    "query": "site:linkedin.com/in \"greytip software\"",
+    "provider": "fixture",
+    "results": [
+      {"title": "Greytip Software - Greytip Software Pvt. Ltd. | LinkedIn", "url": "https://www.linkedin.com/in/greytip-software-802362140/", "snippet": "", "rank": 0},
+      {"title": "Azhar Mohammed - Greytip Software Pvt. Ltd | LinkedIn", "url": "https://www.linkedin.com/in/azhar-mohammed-4149b24/", "snippet": "", "rank": 1},
+      {"title": "Mudassar Khan - Greytip Software Pvt. Ltd. | LinkedIn", "url": "https://www.linkedin.com/in/mudassark/", "snippet": "", "rank": 2},
+      {"title": "Hemanth C - Greytip Software Pvt. Ltd. | LinkedIn", "url": "https://www.linkedin.com/in/hemanth-c-b4146589/", "snippet": "", "rank": 3},
+      {"title": "Monisha Babu - Greytip Software Pvt. Ltd. | LinkedIn", "url": "https://www.linkedin.com/in/monishav/", "snippet": "", "rank": 4},
+      {"title": "Muralidhar B R - Greytip Software Pvt. Ltd. | LinkedIn", "url": "https://in.linkedin.com/in/muralidhar-b-r-a081b46", "snippet": "", "rank": 5},
+      {"title": "Purva Tushir - Greytip Software Pvt. Ltd. | LinkedIn", "url": "https://www.linkedin.com/in/purva-tushir-64b52822b/", "snippet": "", "rank": 6},
+      {"title": "Raghu Reddy - Lead System Admin at Greytip Software Pvt ...", "url": "https://in.linkedin.com/in/raghu-reddy-0431a96b", "snippet": "", "rank": 7},
+      {"title": "Akshay Kumar - BDE @ Greytip Software Pvt. Ltd. | LinkedIn", "url": "https://www.linkedin.com/in/akshay-kumar-b977b08b/", "snippet": "", "rank": 8}
+    ]
+  },
+  {
+    "_comment": "Tier 2 for Girish Rowjee. Same recorded payload as case 1 — this is the query that actually finds the founder the roster missed.",
+    "query": "\"girish rowjee\" \"greytip software\" site:linkedin.com/in Bangalore",
+    "provider": "fixture",
+    "results": [
+      {"title": "Girish Rowjee - Greytip Software Pvt. Ltd. | LinkedIn", "url": "https://www.linkedin.com/in/girishrowjee/", "snippet": "", "rank": 0},
+      {"title": "Greytip Software Pvt. Ltd. | LinkedIn", "url": "https://www.linkedin.com/company/greytip-software-pvt-ltd-", "snippet": "", "rank": 1},
+      {"title": "Girish Rowjee - Co-Founder & CEO @ greytHR - Crunchbase Person Profile", "url": "https://www.crunchbase.com/person/girish-rowjee", "snippet": "", "rank": 2}
+    ]
+  },
+  {
+    "_comment": "CORROBORATION query for the true positive. These results are verbatim from the live search run during design — the query omits the LinkedIn restriction because the whole point is to find a source that is NOT LinkedIn. Crunchbase is editorially maintained and counts; the greythr.com hit is the company's own site under its product brand.",
+    "query": "\"girish rowjee\" \"greytip software\"",
+    "provider": "fixture",
+    "results": [
+      {"title": "Girish Rowjee - Co-Founder & CEO @ greytHR - Crunchbase Person Profile", "url": "https://www.crunchbase.com/person/girish-rowjee", "snippet": "Girish Rowjee is Co-Founder and CEO of Greytip Software, based in Bengaluru.", "rank": 0},
+      {"title": "About Us - Greytip Software Private Limited", "url": "https://www.greythr.com/company/about/", "snippet": "Girish Rowjee co-founded Greytip Software in 1994 and serves as CEO.", "rank": 1},
+      {"title": "Girish Rowjee Email & Phone Number | Greytip Software Pvt. Ltd. CEO", "url": "https://rocketreach.co/girish-rowjee-email_1786181", "snippet": "", "rank": 2}
+    ]
+  },
+  {
+    "_comment": "Tier 1 for Ubiqtech Software: the company has no roster on LinkedIn. Establishes the negative cache for case 2.",
+    "query": "site:linkedin.com/in \"ubiqtech software\"",
+    "provider": "fixture",
+    "results": [
+      {"title": "UBIQTECH SOFTWARE PRIVATE LIMITED | ZaubaCorp", "url": "https://www.zaubacorp.com/company/UBIQTECH-SOFTWARE-PRIVATE-LIMITED/U72200KA2004PTC034337", "snippet": "", "rank": 0},
+      {"title": "Ubiq | LinkedIn", "url": "https://www.linkedin.com/company/ubiq-inc-", "snippet": "", "rank": 1}
+    ]
+  },
+  {
+    "_comment": "Tier 1 for Synthesis Winding: the company DOES have a roster, but the subject is not in it. Forces Tier 2 for case 3.",
+    "query": "site:linkedin.com/in \"synthesis winding technologies\"",
+    "provider": "fixture",
+    "results": [
+      {"title": "Guru sajjan - Synthesis Winding Technologies Pvt Ltd", "url": "https://in.linkedin.com/in/guru-sajjan-ba156213b", "snippet": "", "rank": 0},
+      {"title": "Jagadish B.M - Synthesis Winding Technologies Pvt Ltd", "url": "https://in.linkedin.com/in/jagadish-b-m-151941104", "snippet": "", "rank": 1},
+      {"title": "Synthesis Winding Technologies PVT LTD", "url": "https://in.linkedin.com/in/synthesis-winding-technologies-pvt-ltd-bangalore", "snippet": "", "rank": 2},
+      {"title": "Mahesh Kori - Synthesis Winding Technologies Pvt Ltd.", "url": "https://in.linkedin.com/in/mahesh-kori-3ab2912b", "snippet": "", "rank": 3},
+      {"title": "Mahesh Shastry - Synthesis Winding Technologies Pvt Ltd", "url": "https://in.linkedin.com/in/mahesh-shastry-434944b9", "snippet": "", "rank": 4},
+      {"title": "Swasthik NS - Synthesis Winding Technologies Pvt Ltd", "url": "https://in.linkedin.com/in/swasthik-ns-88832422a", "snippet": "", "rank": 5},
+      {"title": "Vikas H V - Synthesis Winding Technologies Pvt Ltd", "url": "https://in.linkedin.com/in/vikas-h-v-27141b1ab", "snippet": "", "rank": 6},
+      {"title": "Santosh Bellur - Synthesis Winding Technologies Pvt Ltd", "url": "https://in.linkedin.com/in/santosh-bellur-6555b9204", "snippet": "", "rank": 7},
+      {"title": "Sanjai A R - Synthesis Winding Technologies Pvt Ltd", "url": "https://in.linkedin.com/in/sanjai-a-r-27178190", "snippet": "", "rank": 8},
+      {"title": "Design Internship - Synthesis Winding Technologies Pvt Ltd", "url": "https://in.linkedin.com/in/synthesis-india-643b74175", "snippet": "", "rank": 9}
+    ]
+  },
+  {
+    "_comment": "Tier 2 for the Synthesis Winding subject: the search returns the same colleagues, none of whom is him. Must still blank.",
+    "query": "\"melukote shivaramu lokesh\" \"synthesis winding technologies\" site:linkedin.com/in Bangalore",
+    "provider": "fixture",
+    "results": [
+      {"title": "Guru sajjan - Synthesis Winding Technologies Pvt Ltd", "url": "https://in.linkedin.com/in/guru-sajjan-ba156213b", "snippet": "", "rank": 0},
+      {"title": "Jagadish B.M - Synthesis Winding Technologies Pvt Ltd", "url": "https://in.linkedin.com/in/jagadish-b-m-151941104", "snippet": "", "rank": 1},
+      {"title": "Synthesis Winding Technologies PVT LTD", "url": "https://in.linkedin.com/in/synthesis-winding-technologies-pvt-ltd-bangalore", "snippet": "", "rank": 2},
+      {"title": "Mahesh Kori - Synthesis Winding Technologies Pvt Ltd.", "url": "https://in.linkedin.com/in/mahesh-kori-3ab2912b", "snippet": "", "rank": 3}
+    ]
+  },
+  {
+    "_comment": "Tier 1 for the eponymous micro-company. Results carry only the PERSON's name, never the company, so the footprint test must fail.",
+    "query": "site:linkedin.com/in \"zainab fatima fast foods\"",
+    "provider": "fixture",
+    "results": [
+      {"title": "zainab fatima - Berkeley, Illinois, United States | Professional Profile | LinkedIn", "url": "https://www.linkedin.com/in/zainab-fatima-100343a/", "snippet": "", "rank": 0},
+      {"title": "Zainab Fatima - Ericsson", "url": "https://ca.linkedin.com/in/zainab-fatima-90b19277", "snippet": "", "rank": 1},
+      {"title": "80+ \"Zainab Fatima\" profiles", "url": "https://www.linkedin.com/pub/dir/Zainab+Fatima/+", "snippet": "", "rank": 2}
+    ]
+  },
+  {
+    "_comment": "Tier 1 for a typical micro-company: unrelated noise only. Negative cache.",
+    "query": "site:linkedin.com/in \"natesh impex\"",
+    "provider": "fixture",
+    "results": [
+      {"title": "Karan Arora - Sales Director - KARAN EMBOSSING PRIVATE LIMITED | LinkedIn", "url": "https://www.linkedin.com/in/karan-arora-8b995616b/", "snippet": "", "rank": 0},
+      {"title": "Lion Dates", "url": "https://en.wikipedia.org/wiki/Lion_Dates", "snippet": "", "rank": 1},
+      {"title": "Nayak Impex", "url": "https://m.indiamart.com/nayak-impex", "snippet": "", "rank": 2}
+    ]
+  }
+]
